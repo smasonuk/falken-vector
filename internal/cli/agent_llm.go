@@ -9,7 +9,6 @@ import (
 	"github.com/smasonuk/falken-core/pkg/falken"
 	falkenlangchain "github.com/smasonuk/falken-extra/llm/langchaingo"
 	"github.com/smasonuk/falken-vector/internal/llm"
-	"github.com/smasonuk/falken-vector/pkg/embeddings"
 	"github.com/tmc/langchaingo/llms/openai"
 )
 
@@ -40,24 +39,31 @@ func newCLIAgentLLMFromEnv(getenv func(string) string) (falken.LLM, error) {
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(getenv(llm.EnvEmbeddingModelAPIKey))
 	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set %s or %s", llm.ErrMissingAPIKey, llm.EnvLLMAPIKey, llm.EnvEmbeddingModelAPIKey)
-	}
 
 	baseURL := strings.TrimSpace(getenv(llm.EnvLLMBaseURL))
 	if baseURL == "" {
-		baseURL = embeddings.DefaultPortkeyBaseURL
+		return nil, fmt.Errorf("%w: set %s", llm.ErrBaseURLRequired, llm.EnvLLMBaseURL)
 	}
 	modelName := strings.TrimSpace(getenv(llm.EnvLLMModel))
 	if modelName == "" {
-		modelName = llm.DefaultChatModel
+		return nil, fmt.Errorf("%w: set %s", llm.ErrModelRequired, llm.EnvLLMModel)
+	}
+	headers, err := llm.HeadersFromJSONEnv(getenv, llm.EnvLLMHeaders)
+	if err != nil {
+		return nil, err
 	}
 
-	options := []openai.Option{openai.WithToken(apiKey), openai.WithModel(modelName), openai.WithBaseURL(baseURL)}
-	if isDefaultPortkeyBaseURLForCLI(baseURL) {
-		options = append(options, openai.WithHTTPClient(falkenlangchain.NewHeaderHTTPClient(http.DefaultClient, map[string]string{
-			"X-Portkey-Provider": embeddings.DefaultPortkeyProvider,
-		})))
+	options := []openai.Option{openai.WithModel(modelName), openai.WithBaseURL(baseURL)}
+	if apiKey == "" {
+		model, err := newOpenAIModelWithoutAPIKey(modelName, baseURL, headers)
+		if err != nil {
+			return nil, fmt.Errorf("configure OpenAI-compatible agent LLM: %w", err)
+		}
+		return falkenlangchain.New(model), nil
+	}
+	options = append(options, openai.WithToken(apiKey))
+	if len(headers) != 0 {
+		options = append(options, openai.WithHTTPClient(falkenlangchain.NewHeaderHTTPClient(nil, headers)))
 	}
 	model, err := openai.New(options...)
 	if err != nil {
@@ -66,6 +72,38 @@ func newCLIAgentLLMFromEnv(getenv func(string) string) (falken.LLM, error) {
 	return falkenlangchain.New(model), nil
 }
 
-func isDefaultPortkeyBaseURLForCLI(baseURL string) bool {
-	return strings.TrimRight(strings.TrimSpace(baseURL), "/") == strings.TrimRight(embeddings.DefaultPortkeyBaseURL, "/")
+func newOpenAIModelWithoutAPIKey(modelName, baseURL string, headers map[string]string) (*openai.LLM, error) {
+	const placeholderToken = "unused-local-openai-compatible-token"
+	// LangChainGo requires a non-empty token during construction. Strip the
+	// placeholder before transport so local endpoints see no bearer auth.
+	httpClient := stripAuthorizationHTTPClient{
+		Next:             falkenlangchain.NewHeaderHTTPClient(nil, headers),
+		placeholderToken: placeholderToken,
+	}
+	return openai.New(
+		openai.WithToken(placeholderToken),
+		openai.WithModel(modelName),
+		openai.WithBaseURL(baseURL),
+		openai.WithHTTPClient(httpClient),
+	)
+}
+
+type stripAuthorizationHTTPClient struct {
+	Next interface {
+		Do(*http.Request) (*http.Response, error)
+	}
+	placeholderToken string
+}
+
+func (c stripAuthorizationHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	next := c.Next
+	if next == nil {
+		next = http.DefaultClient
+	}
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	if clone.Header.Get("Authorization") == "Bearer "+c.placeholderToken {
+		clone.Header.Del("Authorization")
+	}
+	return next.Do(clone)
 }

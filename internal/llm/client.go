@@ -14,17 +14,54 @@ import (
 )
 
 const (
-	EnvEmbeddingModelAPIKey = "FALKENGO_EMBEDDING_MODEL_API_KEY"
-	EnvEmbeddingModel       = "FALKENGO_EMBEDDING_MODEL"
-	EnvEmbeddingModelURL    = "FALKENGO_EMBEDDING_MODEL_URL"
-	EnvLLMAPIKey            = "FALKENGO_LLM_API_KEY"
-	EnvLLMBaseURL           = "FALKENGO_LLM_BASE_URL"
-	EnvLLMModel             = "FALKENGO_LLM_MODEL"
-	DefaultChatModel        = "gpt-5.2"
-	defaultTemperature      = 0.1
+	EnvEmbeddingModelAPIKey  = "FALKENGO_EMBEDDING_MODEL_API_KEY"
+	EnvEmbeddingModel        = "FALKENGO_EMBEDDING_MODEL"
+	EnvEmbeddingModelURL     = "FALKENGO_EMBEDDING_MODEL_URL"
+	EnvEmbeddingModelHeaders = "FALKENGO_EMBEDDING_MODEL_HEADERS"
+	EnvLLMAPIKey             = "FALKENGO_LLM_API_KEY"
+	EnvLLMBaseURL            = "FALKENGO_LLM_BASE_URL"
+	EnvLLMModel              = "FALKENGO_LLM_MODEL"
+	EnvLLMHeaders            = "FALKENGO_LLM_HEADERS"
+	defaultTemperature       = 0.1
 )
 
-var ErrMissingAPIKey = errors.New("api key is required")
+var (
+	ErrBaseURLRequired = embeddings.ErrBaseURLRequired
+	ErrModelRequired   = embeddings.ErrModelRequired
+)
+
+func HeadersFromJSONEnv(getenv func(string) string, key string) (map[string]string, error) {
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(raw, "{") {
+		return nil, fmt.Errorf("%s must be a JSON object with string header values", key)
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil, fmt.Errorf("parse %s as JSON object with string header values: %w", key, err)
+	}
+	if decoded == nil {
+		return nil, fmt.Errorf("%s must be a JSON object with string header values", key)
+	}
+	headers := make(map[string]string, len(decoded))
+	for name, value := range decoded {
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			continue
+		}
+		headers[name] = value
+	}
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	return headers, nil
+}
 
 type OpenAIEmbedder struct {
 	client interface {
@@ -36,21 +73,24 @@ func NewEnvEmbedder(getenv func(string) string) (*OpenAIEmbedder, error) {
 	if getenv == nil {
 		getenv = func(key string) string { return "" }
 	}
-	apiKey := strings.TrimSpace(getenv(EnvEmbeddingModelAPIKey))
-	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set %s", ErrMissingAPIKey, EnvEmbeddingModelAPIKey)
+	baseURL := strings.TrimSpace(getenv(EnvEmbeddingModelURL))
+	if baseURL == "" {
+		return nil, fmt.Errorf("%w: set %s", embeddings.ErrBaseURLRequired, EnvEmbeddingModelURL)
 	}
-	config := embeddings.PortkeyConfig(apiKey)
-	if model := strings.TrimSpace(getenv(EnvEmbeddingModel)); model != "" {
-		config.Model = model
+	model := strings.TrimSpace(getenv(EnvEmbeddingModel))
+	if model == "" {
+		return nil, fmt.Errorf("%w: set %s", embeddings.ErrModelRequired, EnvEmbeddingModel)
 	}
-	if baseURL := strings.TrimSpace(getenv(EnvEmbeddingModelURL)); baseURL != "" {
-		config.BaseURL = baseURL
-		if !isDefaultPortkeyBaseURL(baseURL) {
-			delete(config.Headers, "X-Portkey-Provider")
-		}
+	headers, err := HeadersFromJSONEnv(getenv, EnvEmbeddingModelHeaders)
+	if err != nil {
+		return nil, err
 	}
-	client, err := embeddings.New(config)
+	client, err := embeddings.New(embeddings.Config{
+		BaseURL: baseURL,
+		APIKey:  strings.TrimSpace(getenv(EnvEmbeddingModelAPIKey)),
+		Model:   model,
+		Headers: headers,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -99,22 +139,17 @@ func NewEnvChatClient(getenv func(string) string) (*ChatClient, error) {
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(getenv(EnvEmbeddingModelAPIKey))
 	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set %s or %s", ErrMissingAPIKey, EnvLLMAPIKey, EnvEmbeddingModelAPIKey)
-	}
 	baseURL := strings.TrimSpace(getenv(EnvLLMBaseURL))
 	if baseURL == "" {
-		baseURL = embeddings.DefaultPortkeyBaseURL
+		return nil, fmt.Errorf("%w: set %s", embeddings.ErrBaseURLRequired, EnvLLMBaseURL)
 	}
 	model := strings.TrimSpace(getenv(EnvLLMModel))
 	if model == "" {
-		model = DefaultChatModel
+		return nil, fmt.Errorf("%w: set %s", embeddings.ErrModelRequired, EnvLLMModel)
 	}
-	headers := map[string]string(nil)
-	if isDefaultPortkeyBaseURL(baseURL) {
-		headers = map[string]string{
-			"X-Portkey-Provider": embeddings.DefaultPortkeyProvider,
-		}
+	headers, err := HeadersFromJSONEnv(getenv, EnvLLMHeaders)
+	if err != nil {
+		return nil, err
 	}
 	return NewChatClient(ChatConfig{
 		BaseURL: baseURL,
@@ -136,27 +171,16 @@ type ChatConfig struct {
 
 func NewChatClient(config ChatConfig) (*ChatClient, error) {
 	apiKey := strings.TrimSpace(config.APIKey)
-	if apiKey == "" {
-		return nil, ErrMissingAPIKey
-	}
 	baseURL := strings.TrimRight(strings.TrimSpace(config.BaseURL), "/")
 	if baseURL == "" {
-		baseURL = embeddings.DefaultPortkeyBaseURL
+		return nil, embeddings.ErrBaseURLRequired
 	}
 	model := strings.TrimSpace(config.Model)
-	if model == "" {
-		model = DefaultChatModel
-	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	headers := make(map[string]string, len(config.Headers))
-	for name, value := range config.Headers {
-		if strings.TrimSpace(name) != "" && strings.TrimSpace(value) != "" {
-			headers[strings.TrimSpace(name)] = strings.TrimSpace(value)
-		}
-	}
+	headers := copyHeaders(config.Headers)
 	return &ChatClient{baseURL: baseURL, apiKey: apiKey, model: model, headers: headers, httpClient: httpClient}, nil
 }
 
@@ -167,6 +191,9 @@ func (c *ChatClient) Complete(ctx context.Context, req CompletionRequest) (Compl
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
 		model = c.model
+	}
+	if model == "" {
+		return CompletionResponse{}, embeddings.ErrModelRequired
 	}
 	temp := req.Temperature
 	if temp == 0 {
@@ -187,7 +214,9 @@ func (c *ChatClient) Complete(ctx context.Context, req CompletionRequest) (Compl
 	if err != nil {
 		return CompletionResponse{}, fmt.Errorf("create chat completion request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	for name, value := range c.headers {
 		httpReq.Header.Set(name, value)
@@ -262,6 +291,15 @@ func apiError(label string, statusCode int, body []byte) error {
 	return fmt.Errorf("%s failed with status %d: %s", label, statusCode, bodyText)
 }
 
-func isDefaultPortkeyBaseURL(baseURL string) bool {
-	return strings.TrimRight(strings.TrimSpace(baseURL), "/") == strings.TrimRight(embeddings.DefaultPortkeyBaseURL, "/")
+func copyHeaders(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for name, value := range headers {
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			continue
+		}
+		out[name] = value
+	}
+	return out
 }

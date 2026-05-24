@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	falkenvector "github.com/smasonuk/falken-vector"
@@ -20,12 +21,25 @@ func main() {
 }
 
 func run() error {
-	apiKey := os.Getenv(llm.EnvEmbeddingModelAPIKey)
-	if apiKey == "" {
-		return fmt.Errorf("%s environment variable is required", llm.EnvEmbeddingModelAPIKey)
+	baseURL := strings.TrimSpace(os.Getenv(llm.EnvEmbeddingModelURL))
+	if baseURL == "" {
+		return fmt.Errorf("%s environment variable is required", llm.EnvEmbeddingModelURL)
+	}
+	model := strings.TrimSpace(os.Getenv(llm.EnvEmbeddingModel))
+	if model == "" {
+		return fmt.Errorf("%s environment variable is required", llm.EnvEmbeddingModel)
+	}
+	headers, err := llm.HeadersFromJSONEnv(os.Getenv, llm.EnvEmbeddingModelHeaders)
+	if err != nil {
+		return err
 	}
 
-	client, err := falkenvector.New(falkenvector.PortkeyConfig(apiKey))
+	client, err := falkenvector.New(falkenvector.Config{
+		BaseURL: baseURL,
+		APIKey:  strings.TrimSpace(os.Getenv(llm.EnvEmbeddingModelAPIKey)),
+		Model:   model,
+		Headers: headers,
+	})
 	if err != nil {
 		return fmt.Errorf("configure embeddings client: %w", err)
 	}

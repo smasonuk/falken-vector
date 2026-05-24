@@ -12,28 +12,59 @@ No background daemon, external database server, CGO, or home-directory state is 
 
 ## Environment
 
-Embeddings use Portkey/OpenAI-compatible APIs.
+Falken Vector expects OpenAI-compatible `/embeddings` and `/chat/completions` endpoints. Providers with different wire formats should be integrated by implementing the provider/embedder interfaces.
 
 ```bash
-export FALKENGO_EMBEDDING_MODEL_API_KEY=...
+export FALKENGO_EMBEDDING_MODEL_URL="https://api.example.com/v1"
+export FALKENGO_EMBEDDING_MODEL="embedding-model"
+export FALKENGO_EMBEDDING_MODEL_API_KEY="optional-token"
+export FALKENGO_EMBEDDING_MODEL_HEADERS='{"Header-Name":"value"}'
+
+export FALKENGO_LLM_BASE_URL="https://api.example.com/v1"
+export FALKENGO_LLM_MODEL="chat-model"
+export FALKENGO_LLM_API_KEY="optional-token"
+export FALKENGO_LLM_HEADERS='{"Header-Name":"value"}'
 ```
 
-Optional embedding overrides:
+The API key variables may be omitted when the provider does not need bearer auth. Header variables are JSON objects and are useful for provider routing, organization IDs, or non-bearer authentication.
+
+Hosted OpenAI-compatible provider with bearer token:
 
 ```bash
-export FALKENGO_EMBEDDING_MODEL=text-embedding-3-small
-export FALKENGO_EMBEDDING_MODEL_URL=https://portkey.syngenta.com/v1
+export FALKENGO_EMBEDDING_MODEL_URL="https://api.example.com/v1"
+export FALKENGO_EMBEDDING_MODEL="text-embedding-3-small"
+export FALKENGO_EMBEDDING_MODEL_API_KEY="sk-..."
+
+export FALKENGO_LLM_BASE_URL="https://api.example.com/v1"
+export FALKENGO_LLM_MODEL="gpt-compatible-model"
+export FALKENGO_LLM_API_KEY="sk-..."
 ```
 
-Optional LLM overrides for `ask`:
+Local OpenAI-compatible provider with no API key:
 
 ```bash
-export FALKENGO_LLM_API_KEY=...
-export FALKENGO_LLM_BASE_URL=https://portkey.syngenta.com/v1
-export FALKENGO_LLM_MODEL=gpt-5.2
+export FALKENGO_EMBEDDING_MODEL_URL="http://127.0.0.1:11434/v1"
+export FALKENGO_EMBEDDING_MODEL="nomic-embed-text"
+
+export FALKENGO_LLM_BASE_URL="http://127.0.0.1:11434/v1"
+export FALKENGO_LLM_MODEL="llama3.1"
 ```
 
-If `FALKENGO_LLM_API_KEY` is not set, `ask` uses `FALKENGO_EMBEDDING_MODEL_API_KEY`.
+Portkey can be used by supplying its URL and routing header explicitly:
+
+```bash
+export FALKENGO_EMBEDDING_MODEL_URL="https://portkey.syngenta.com/v1"
+export FALKENGO_EMBEDDING_MODEL="text-embedding-3-small"
+export FALKENGO_EMBEDDING_MODEL_API_KEY="..."
+export FALKENGO_EMBEDDING_MODEL_HEADERS='{"X-Portkey-Provider":"@openai-aifoundry-swc-001"}'
+
+export FALKENGO_LLM_BASE_URL="https://portkey.syngenta.com/v1"
+export FALKENGO_LLM_MODEL="gpt-5.2"
+export FALKENGO_LLM_API_KEY="..."
+export FALKENGO_LLM_HEADERS='{"X-Portkey-Provider":"@openai-aifoundry-swc-001"}'
+```
+
+If `FALKENGO_LLM_API_KEY` is not set, `ask` uses `FALKENGO_EMBEDDING_MODEL_API_KEY` when present.
 
 ## Development checkout
 
@@ -123,9 +154,11 @@ Agentic ask uses the same embedding environment variables as retrieval and the O
 FALKENGO_EMBEDDING_MODEL_API_KEY
 FALKENGO_EMBEDDING_MODEL
 FALKENGO_EMBEDDING_MODEL_URL
+FALKENGO_EMBEDDING_MODEL_HEADERS
 FALKENGO_LLM_API_KEY
 FALKENGO_LLM_BASE_URL
 FALKENGO_LLM_MODEL
+FALKENGO_LLM_HEADERS
 ```
 
 Smoke-test checklist:

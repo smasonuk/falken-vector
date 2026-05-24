@@ -2,6 +2,7 @@ package falkenvector
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	internalconfig "github.com/smasonuk/falken-vector/internal/config"
 	"github.com/smasonuk/falken-vector/internal/manifest"
+	"github.com/smasonuk/falken-vector/pkg/embeddings"
 )
 
 func TestNewEngineMinimalLexicalCloseAndSilent(t *testing.T) {
@@ -42,14 +44,19 @@ func TestEngineConfigFromEnvReadsFalkengoKeys(t *testing.T) {
 		"FALKENGO_EMBEDDING_MODEL_API_KEY": "embed-key",
 		"FALKENGO_EMBEDDING_MODEL":         "embed-model",
 		"FALKENGO_EMBEDDING_MODEL_URL":     "https://embed.test/v1",
+		"FALKENGO_EMBEDDING_MODEL_HEADERS": `{"X-Embed-Provider":"embed-provider"}`,
 		"FALKENGO_LLM_API_KEY":             "chat-key",
 		"FALKENGO_LLM_BASE_URL":            "https://chat.test/v1",
 		"FALKENGO_LLM_MODEL":               "chat-model",
+		"FALKENGO_LLM_HEADERS":             `{"X-Chat-Provider":"chat-provider"}`,
 	}
 
-	config := EngineConfigFromEnv(func(key string) string {
+	config, err := EngineConfigFromEnvE(func(key string) string {
 		return values[key]
 	})
+	if err != nil {
+		t.Fatalf("EngineConfigFromEnvE: %v", err)
+	}
 
 	if config.StateDir != "/tmp/falken-state" {
 		t.Fatalf("StateDir = %q", config.StateDir)
@@ -57,8 +64,14 @@ func TestEngineConfigFromEnvReadsFalkengoKeys(t *testing.T) {
 	if config.Embedding.APIKey != "embed-key" || config.Embedding.BaseURL != "https://embed.test/v1" || config.Embedding.Model != "embed-model" {
 		t.Fatalf("Embedding = %+v", config.Embedding)
 	}
+	if config.Embedding.Headers["X-Embed-Provider"] != "embed-provider" {
+		t.Fatalf("Embedding headers = %+v", config.Embedding.Headers)
+	}
 	if config.Chat.APIKey != "chat-key" || config.Chat.BaseURL != "https://chat.test/v1" || config.Chat.Model != "chat-model" {
 		t.Fatalf("Chat = %+v", config.Chat)
+	}
+	if config.Chat.Headers["X-Chat-Provider"] != "chat-provider" {
+		t.Fatalf("Chat headers = %+v", config.Chat.Headers)
 	}
 }
 
@@ -71,6 +84,67 @@ func TestEngineConfigFromEnvFallsBackToEmbeddingKeyForChat(t *testing.T) {
 	})
 	if config.Chat.APIKey != "shared-key" {
 		t.Fatalf("Chat APIKey = %q, want fallback embedding key", config.Chat.APIKey)
+	}
+}
+
+func TestEngineConfigFromEnvERejectsInvalidHeaders(t *testing.T) {
+	_, err := EngineConfigFromEnvE(func(key string) string {
+		if key == "FALKENGO_LLM_HEADERS" {
+			return `{bad json`
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("EngineConfigFromEnvE succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "FALKENGO_LLM_HEADERS") {
+		t.Fatalf("error = %v, want env var name", err)
+	}
+}
+
+func TestEngineModelConfigTrimsAndDoesNotDefaultProvider(t *testing.T) {
+	engine, err := NewEngine(EngineConfig{
+		StateDir: t.TempDir(),
+		Embedding: ModelConfig{
+			APIKey:  " embed-key ",
+			BaseURL: " https://embed.test/v1/ ",
+			Model:   " embed-model ",
+			Headers: map[string]string{" X-Embed-Provider ": " embed-provider "},
+		},
+		Chat: ModelConfig{
+			BaseURL: " https://chat.test/v1/ ",
+			Model:   " chat-model ",
+			Headers: map[string]string{" X-Chat-Provider ": " chat-provider "},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	embedding := engine.embeddingConfig()
+	if embedding.BaseURL != "https://embed.test/v1/" || embedding.Model != "embed-model" || embedding.APIKey != " embed-key " {
+		t.Fatalf("embedding config = %+v", embedding)
+	}
+	if !reflect.DeepEqual(embedding.Headers, map[string]string{"X-Embed-Provider": "embed-provider"}) {
+		t.Fatalf("embedding headers = %+v", embedding.Headers)
+	}
+	chat := engine.chatConfig()
+	if chat.BaseURL != "https://chat.test/v1/" || chat.Model != "chat-model" || chat.APIKey != " embed-key " {
+		t.Fatalf("chat config = %+v", chat)
+	}
+	if !reflect.DeepEqual(chat.Headers, map[string]string{"X-Chat-Provider": "chat-provider"}) {
+		t.Fatalf("chat headers = %+v", chat.Headers)
+	}
+}
+
+func TestEngineNewEmbedderRequiresExplicitURL(t *testing.T) {
+	engine, err := NewEngine(EngineConfig{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	_, err = engine.newEmbedder()
+	if !errors.Is(err, embeddings.ErrBaseURLRequired) {
+		t.Fatalf("newEmbedder error = %v, want base URL required", err)
 	}
 }
 

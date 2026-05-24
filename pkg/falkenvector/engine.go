@@ -52,6 +52,31 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 
 // EngineConfigFromEnv reads FALKENGO_* model configuration from getenv.
 func EngineConfigFromEnv(getenv func(string) string) EngineConfig {
+	config, err := EngineConfigFromEnvE(getenv)
+	if err != nil {
+		return engineConfigFromEnv(getenv, nil, nil)
+	}
+	return config
+}
+
+// EngineConfigFromEnvE reads FALKENGO_* model configuration from getenv and
+// reports malformed structured env values.
+func EngineConfigFromEnvE(getenv func(string) string) (EngineConfig, error) {
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	embeddingHeaders, err := llm.HeadersFromJSONEnv(getenv, llm.EnvEmbeddingModelHeaders)
+	if err != nil {
+		return EngineConfig{}, err
+	}
+	chatHeaders, err := llm.HeadersFromJSONEnv(getenv, llm.EnvLLMHeaders)
+	if err != nil {
+		return EngineConfig{}, err
+	}
+	return engineConfigFromEnv(getenv, embeddingHeaders, chatHeaders), nil
+}
+
+func engineConfigFromEnv(getenv func(string) string, embeddingHeaders, chatHeaders map[string]string) EngineConfig {
 	if getenv == nil {
 		getenv = func(string) string { return "" }
 	}
@@ -65,11 +90,13 @@ func EngineConfigFromEnv(getenv func(string) string) EngineConfig {
 			APIKey:  strings.TrimSpace(getenv(llm.EnvEmbeddingModelAPIKey)),
 			BaseURL: strings.TrimSpace(getenv(llm.EnvEmbeddingModelURL)),
 			Model:   strings.TrimSpace(getenv(llm.EnvEmbeddingModel)),
+			Headers: embeddingHeaders,
 		},
 		Chat: ModelConfig{
 			APIKey:  chatAPIKey,
 			BaseURL: strings.TrimSpace(getenv(llm.EnvLLMBaseURL)),
 			Model:   strings.TrimSpace(getenv(llm.EnvLLMModel)),
+			Headers: chatHeaders,
 		},
 	}
 }
@@ -589,35 +616,75 @@ func (e *Engine) agentLLM() (falken.LLM, error) {
 		return e.config.AgentLLM, nil
 	}
 	config := e.chatConfig()
-	if strings.TrimSpace(config.APIKey) == "" {
-		return nil, llm.ErrMissingAPIKey
+	if strings.TrimSpace(config.BaseURL) == "" {
+		return nil, fmt.Errorf("%w: set %s", embeddings.ErrBaseURLRequired, llm.EnvLLMBaseURL)
+	}
+	if strings.TrimSpace(config.Model) == "" {
+		return nil, fmt.Errorf("%w: set %s", embeddings.ErrModelRequired, llm.EnvLLMModel)
 	}
 	options := []openai.Option{
-		openai.WithToken(config.APIKey),
 		openai.WithModel(config.Model),
 		openai.WithBaseURL(config.BaseURL),
 	}
-	if e.config.HTTPClient != nil || len(config.Headers) != 0 {
-		options = append(options, openai.WithHTTPClient(falkenlangchain.NewHeaderHTTPClient(e.config.HTTPClient, config.Headers)))
+	if apiKey := strings.TrimSpace(config.APIKey); apiKey != "" {
+		options = append(options, openai.WithToken(apiKey))
+		if e.config.HTTPClient != nil || len(config.Headers) != 0 {
+			options = append(options, openai.WithHTTPClient(falkenlangchain.NewHeaderHTTPClient(e.config.HTTPClient, config.Headers)))
+		}
+		model, err := openai.New(options...)
+		if err != nil {
+			return nil, fmt.Errorf("configure OpenAI-compatible agent LLM: %w", err)
+		}
+		return falkenlangchain.New(model), nil
 	}
-	model, err := openai.New(options...)
+	model, err := newOpenAIModelWithoutAPIKey(config.Model, config.BaseURL, e.config.HTTPClient, config.Headers)
 	if err != nil {
 		return nil, fmt.Errorf("configure OpenAI-compatible agent LLM: %w", err)
 	}
 	return falkenlangchain.New(model), nil
 }
 
+func newOpenAIModelWithoutAPIKey(modelName, baseURL string, httpClient HTTPClient, headers map[string]string) (*openai.LLM, error) {
+	const placeholderToken = "unused-local-openai-compatible-token"
+	// LangChainGo requires a non-empty token during construction. Strip the
+	// placeholder before transport so local endpoints see no bearer auth.
+	httpClientWithoutPlaceholderAuth := stripAuthorizationHTTPClient{
+		Next:             falkenlangchain.NewHeaderHTTPClient(httpClient, headers),
+		placeholderToken: placeholderToken,
+	}
+	return openai.New(
+		openai.WithToken(placeholderToken),
+		openai.WithModel(modelName),
+		openai.WithBaseURL(baseURL),
+		openai.WithHTTPClient(httpClientWithoutPlaceholderAuth),
+	)
+}
+
+type stripAuthorizationHTTPClient struct {
+	Next interface {
+		Do(*http.Request) (*http.Response, error)
+	}
+	placeholderToken string
+}
+
+func (c stripAuthorizationHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	next := c.Next
+	if next == nil {
+		next = http.DefaultClient
+	}
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	if clone.Header.Get("Authorization") == "Bearer "+c.placeholderToken {
+		clone.Header.Del("Authorization")
+	}
+	return next.Do(clone)
+}
+
 func (e *Engine) embeddingConfig() ModelConfig {
 	config := e.config.Embedding
 	config.BaseURL = strings.TrimSpace(config.BaseURL)
-	if config.BaseURL == "" {
-		config.BaseURL = embeddings.DefaultPortkeyBaseURL
-	}
 	config.Model = strings.TrimSpace(config.Model)
-	if config.Model == "" {
-		config.Model = embeddings.DefaultEmbeddingModel
-	}
-	config.Headers = defaultedHeaders(config.BaseURL, config.Headers)
+	config.Headers = copyHeaders(config.Headers)
 	return config
 }
 
@@ -627,29 +694,9 @@ func (e *Engine) chatConfig() ModelConfig {
 		config.APIKey = e.config.Embedding.APIKey
 	}
 	config.BaseURL = strings.TrimSpace(config.BaseURL)
-	if config.BaseURL == "" {
-		config.BaseURL = embeddings.DefaultPortkeyBaseURL
-	}
 	config.Model = strings.TrimSpace(config.Model)
-	if config.Model == "" {
-		config.Model = llm.DefaultChatModel
-	}
-	config.Headers = defaultedHeaders(config.BaseURL, config.Headers)
+	config.Headers = copyHeaders(config.Headers)
 	return config
-}
-
-func defaultedHeaders(baseURL string, headers map[string]string) map[string]string {
-	out := copyHeaders(headers)
-	if isDefaultPortkeyBaseURL(baseURL) {
-		if _, ok := out["X-Portkey-Provider"]; !ok {
-			out["X-Portkey-Provider"] = embeddings.DefaultPortkeyProvider
-		}
-	}
-	return out
-}
-
-func isDefaultPortkeyBaseURL(baseURL string) bool {
-	return strings.TrimRight(strings.TrimSpace(baseURL), "/") == strings.TrimRight(embeddings.DefaultPortkeyBaseURL, "/")
 }
 
 func copyHeaders(headers map[string]string) map[string]string {

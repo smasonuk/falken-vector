@@ -13,20 +13,10 @@ import (
 	"strings"
 )
 
-const (
-	// DefaultPortkeyBaseURL is the Portkey OpenAI-compatible base URL.
-	DefaultPortkeyBaseURL = "https://portkey.syngenta.com/v1"
-
-	// DefaultPortkeyProvider is the Portkey provider header value for the
-	// Syngenta OpenAI Foundry deployment.
-	DefaultPortkeyProvider = "@openai-aifoundry-swc-001"
-
-	// DefaultEmbeddingModel is the default OpenAI embeddings model used by this package.
-	DefaultEmbeddingModel = "text-embedding-3-small"
+var (
+	ErrBaseURLRequired = errors.New("base URL is required")
+	ErrModelRequired   = errors.New("embedding model is required")
 )
-
-// ErrAPIKeyRequired indicates a client was configured without an API key.
-var ErrAPIKeyRequired = errors.New("api key is required")
 
 // Provider is the minimal embeddings provider contract.
 type Provider interface {
@@ -75,34 +65,14 @@ type Client struct {
 	httpClient HTTPClient
 }
 
-// PortkeyConfig returns the default Falken Portkey embeddings configuration.
-func PortkeyConfig(apiKey string) Config {
-	return Config{
-		BaseURL: DefaultPortkeyBaseURL,
-		APIKey:  apiKey,
-		Model:   DefaultEmbeddingModel,
-		Headers: map[string]string{
-			"X-Portkey-Provider": DefaultPortkeyProvider,
-		},
-	}
-}
-
 // New creates an embeddings client.
 func New(config Config) (*Client, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(config.BaseURL), "/")
 	if baseURL == "" {
-		baseURL = DefaultPortkeyBaseURL
-	}
-
-	apiKey := strings.TrimSpace(config.APIKey)
-	if apiKey == "" {
-		return nil, ErrAPIKeyRequired
+		return nil, ErrBaseURLRequired
 	}
 
 	model := strings.TrimSpace(config.Model)
-	if model == "" {
-		model = DefaultEmbeddingModel
-	}
 
 	httpClient := config.HTTPClient
 	if httpClient == nil {
@@ -121,7 +91,7 @@ func New(config Config) (*Client, error) {
 
 	return &Client{
 		baseURL:    baseURL,
-		apiKey:     apiKey,
+		apiKey:     strings.TrimSpace(config.APIKey),
 		model:      model,
 		headers:    headers,
 		httpClient: httpClient,
@@ -140,6 +110,9 @@ func (c *Client) Embed(ctx context.Context, request EmbeddingRequest) (Embedding
 	if model == "" {
 		model = c.model
 	}
+	if model == "" {
+		return EmbeddingResponse{}, ErrModelRequired
+	}
 
 	body, err := json.Marshal(embeddingAPIRequest{
 		Model:          model,
@@ -154,7 +127,9 @@ func (c *Client) Embed(ctx context.Context, request EmbeddingRequest) (Embedding
 	if err != nil {
 		return EmbeddingResponse{}, fmt.Errorf("create embeddings request: %w", err)
 	}
-	httpRequest.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.apiKey != "" {
+		httpRequest.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	for name, value := range c.headers {
 		httpRequest.Header.Set(name, value)

@@ -13,7 +13,7 @@ import (
 	falkenvector "github.com/smasonuk/falken-vector"
 )
 
-func TestClientEmbedSendsOpenAICompatiblePortkeyRequest(t *testing.T) {
+func TestClientEmbedSendsOpenAICompatibleRequest(t *testing.T) {
 	var requestBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -31,8 +31,8 @@ func TestClientEmbedSendsOpenAICompatiblePortkeyRequest(t *testing.T) {
 			http.Error(w, "bad authorization", http.StatusBadRequest)
 			return
 		}
-		if got := r.Header.Get("X-Portkey-Provider"); got != falkenvector.DefaultPortkeyProvider {
-			t.Errorf("X-Portkey-Provider = %q, want default provider", got)
+		if got := r.Header.Get("X-Test-Provider"); got != "test-provider" {
+			t.Errorf("X-Test-Provider = %q, want configured provider header", got)
 			http.Error(w, "bad provider header", http.StatusBadRequest)
 			return
 		}
@@ -50,7 +50,7 @@ func TestClientEmbedSendsOpenAICompatiblePortkeyRequest(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{
 			"object":"list",
-			"model":"text-embedding-3-small",
+			"model":"embed-test-model",
 			"data":[{"object":"embedding","index":0,"embedding":[0.25,-0.5,0.75]}],
 			"usage":{"prompt_tokens":4,"total_tokens":4}
 		}`)
@@ -60,8 +60,9 @@ func TestClientEmbedSendsOpenAICompatiblePortkeyRequest(t *testing.T) {
 	client, err := falkenvector.New(falkenvector.Config{
 		BaseURL: server.URL + "/",
 		APIKey:  " test-key ",
+		Model:   "embed-test-model",
 		Headers: map[string]string{
-			"X-Portkey-Provider": falkenvector.DefaultPortkeyProvider,
+			"X-Test-Provider": "test-provider",
 		},
 	})
 	if err != nil {
@@ -75,8 +76,8 @@ func TestClientEmbedSendsOpenAICompatiblePortkeyRequest(t *testing.T) {
 		t.Fatalf("Embed: %v", err)
 	}
 
-	if got := requestBody["model"]; got != falkenvector.DefaultEmbeddingModel {
-		t.Fatalf("model = %v, want default embedding model", got)
+	if got := requestBody["model"]; got != "embed-test-model" {
+		t.Fatalf("model = %v, want configured embedding model", got)
 	}
 	if got := requestBody["input"]; got != " hello Falken vectors " {
 		t.Fatalf("input = %v, want exact input", got)
@@ -84,8 +85,8 @@ func TestClientEmbedSendsOpenAICompatiblePortkeyRequest(t *testing.T) {
 	if got := requestBody["encoding_format"]; got != "float" {
 		t.Fatalf("encoding_format = %v, want float", got)
 	}
-	if response.Model != falkenvector.DefaultEmbeddingModel {
-		t.Fatalf("response model = %q, want default embedding model", response.Model)
+	if response.Model != "embed-test-model" {
+		t.Fatalf("response model = %q, want configured embedding model", response.Model)
 	}
 	if len(response.Embedding) != 3 || response.Embedding[0] != 0.25 || response.Embedding[1] != -0.5 || response.Embedding[2] != 0.75 {
 		t.Fatalf("embedding = %+v, want parsed vector", response.Embedding)
@@ -95,26 +96,116 @@ func TestClientEmbedSendsOpenAICompatiblePortkeyRequest(t *testing.T) {
 	}
 }
 
-func TestPortkeyConfigSetsDefaults(t *testing.T) {
-	config := falkenvector.PortkeyConfig("test-key")
-	if config.BaseURL != falkenvector.DefaultPortkeyBaseURL {
-		t.Fatalf("base URL = %q, want default Portkey URL", config.BaseURL)
-	}
-	if config.APIKey != "test-key" {
-		t.Fatalf("api key = %q, want provided key", config.APIKey)
-	}
-	if config.Model != falkenvector.DefaultEmbeddingModel {
-		t.Fatalf("model = %q, want default embedding model", config.Model)
-	}
-	if config.Headers["X-Portkey-Provider"] != falkenvector.DefaultPortkeyProvider {
-		t.Fatalf("provider header = %q, want default provider", config.Headers["X-Portkey-Provider"])
+func TestNewRequiresBaseURL(t *testing.T) {
+	_, err := falkenvector.New(falkenvector.Config{})
+	if !errors.Is(err, falkenvector.ErrBaseURLRequired) {
+		t.Fatalf("New error = %v, want ErrBaseURLRequired", err)
 	}
 }
 
-func TestNewRequiresAPIKey(t *testing.T) {
-	_, err := falkenvector.New(falkenvector.Config{})
-	if !errors.Is(err, falkenvector.ErrAPIKeyRequired) {
-		t.Fatalf("New error = %v, want ErrAPIKeyRequired", err)
+func TestNewAllowsMissingAPIKeyWhenBaseURLIsProvided(t *testing.T) {
+	client, err := falkenvector.New(falkenvector.Config{
+		BaseURL: "https://example.test/v1",
+		Model:   "embed-model",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if client == nil {
+		t.Fatal("New returned nil client")
+	}
+}
+
+func TestClientEmbedRequiresModel(t *testing.T) {
+	client, err := falkenvector.New(falkenvector.Config{
+		BaseURL: "https://example.test/v1",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = client.Embed(context.Background(), falkenvector.EmbeddingRequest{Input: "hello"})
+	if !errors.Is(err, falkenvector.ErrModelRequired) {
+		t.Fatalf("Embed error = %v, want ErrModelRequired", err)
+	}
+}
+
+func TestClientEmbedRequestModelOverridesClientModel(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, `{"model":"request-model","data":[{"embedding":[1]}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	client, err := falkenvector.New(falkenvector.Config{
+		BaseURL: server.URL,
+		Model:   "client-model",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = client.Embed(context.Background(), falkenvector.EmbeddingRequest{
+		Input: "hello",
+		Model: "request-model",
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if got := requestBody["model"]; got != "request-model" {
+		t.Fatalf("model = %v, want request override", got)
+	}
+}
+
+func TestClientEmbedAddsNoProviderHeaderByDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Test-Provider"); got != "" {
+			t.Errorf("X-Test-Provider = %q, want no automatic provider header", got)
+			http.Error(w, "bad provider header", http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, `{"model":"embed-model","data":[{"embedding":[1]}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	client, err := falkenvector.New(falkenvector.Config{
+		BaseURL: server.URL,
+		Model:   "embed-model",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.Embed(context.Background(), falkenvector.EmbeddingRequest{Input: "hello"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+}
+
+func TestClientEmbedCustomAuthorizationHeaderOverridesAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Provider custom-token" {
+			t.Errorf("authorization = %q, want custom header", got)
+			http.Error(w, "bad authorization", http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, `{"model":"embed-model","data":[{"embedding":[1]}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	client, err := falkenvector.New(falkenvector.Config{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "embed-model",
+		Headers: map[string]string{"Authorization": "Provider custom-token"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.Embed(context.Background(), falkenvector.EmbeddingRequest{Input: "hello"}); err != nil {
+		t.Fatalf("Embed: %v", err)
 	}
 }
 
@@ -128,6 +219,7 @@ func TestClientEmbedReportsAPIErrors(t *testing.T) {
 	client, err := falkenvector.New(falkenvector.Config{
 		BaseURL: server.URL,
 		APIKey:  "test-key",
+		Model:   "embed-model",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -146,7 +238,8 @@ func TestClientEmbedReportsAPIErrors(t *testing.T) {
 
 func TestClientEmbedRequiresInput(t *testing.T) {
 	client, err := falkenvector.New(falkenvector.Config{
-		APIKey: "test-key",
+		BaseURL: "https://example.test/v1",
+		Model:   "embed-model",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

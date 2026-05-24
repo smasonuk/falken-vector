@@ -10,8 +10,8 @@ import (
 
 // ModelConfig describes an OpenAI-compatible model endpoint.
 //
-// Empty BaseURL and Model values use SDK defaults when the model is needed.
-// Headers are copied before use.
+// BaseURL and Model must be supplied when the model is needed. Headers are
+// copied before use.
 type ModelConfig struct {
 	APIKey  string
 	BaseURL string

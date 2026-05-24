@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -175,10 +176,18 @@ func TestAskAgentOpenSourceOutOfRangeReportsAvailableSources(t *testing.T) {
 
 func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
-	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.Events == nil {
+			t.Fatal("Events sink was not configured")
+		}
+		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+			ID:        "call-1",
+			Name:      "search_index",
+			Arguments: json.RawMessage(`{"query":" hello ","top_k":8}`),
+		}})
 		return agentask.Result{
 			Answer:           "agent answer",
-			ToolCalls:        []string{"search_index", "search_index"},
+			ToolCalls:        []string{"search_index"},
 			CitationWarnings: []string{"answer did not cite any source"},
 		}
 	})
@@ -192,8 +201,14 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	stderr := errOut.String()
-	if !strings.Contains(stderr, "warning: answer did not cite any source") || strings.Count(stderr, "agent tool call: search_index") != 2 {
-		t.Fatalf("stderr = %q, want warning and tool calls", stderr)
+	if !strings.Contains(stderr, `agent tool call: search_index {"query":" hello ","top_k":8}`) {
+		t.Fatalf("stderr = %q, want live tool call with arguments", stderr)
+	}
+	if !strings.Contains(stderr, "warning: answer did not cite any source") {
+		t.Fatalf("stderr = %q, want warning", stderr)
+	}
+	if strings.Count(stderr, "agent tool call: search_index") != 1 {
+		t.Fatalf("stderr = %q, want one live tool call line", stderr)
 	}
 }
 

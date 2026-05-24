@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/smasonuk/falken-core/pkg/falken"
 	"github.com/smasonuk/falken-vector/internal/agentask"
 	"github.com/smasonuk/falken-vector/internal/llm"
 	"github.com/smasonuk/falken-vector/internal/manifest"
@@ -75,7 +76,7 @@ func newAskCommand(opts *options) *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("configure agent LLM: %w", err)
 				}
-				result, err := runAgentAsk(ctx, agentask.Options{
+				agentOptions := agentask.Options{
 					Question:              args[0],
 					Paths:                 paths,
 					Store:                 store,
@@ -87,7 +88,15 @@ func newAskCommand(opts *options) *cobra.Command {
 					ConfigureQueryPlanner: configureQueryPlanner,
 					CitationPolicy:        citationPolicy,
 					MaxSearchCalls:        maxAgentSearches,
-				})
+				}
+				if showAgentTools {
+					agentOptions.Events = func(event falken.Event) {
+						if event.ToolCall != nil {
+							fmt.Fprintf(cmd.ErrOrStderr(), "agent tool call: %s %s\n", event.ToolCall.Name, formatAgentToolArguments(event.ToolCall.Arguments))
+						}
+					}
+				}
+				result, err := runAgentAsk(ctx, agentOptions)
 				if err != nil {
 					return fmt.Errorf("ask agent: %w", err)
 				}
@@ -97,11 +106,6 @@ func newAskCommand(opts *options) *cobra.Command {
 					}
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
-				if showAgentTools {
-					for _, name := range result.ToolCalls {
-						fmt.Fprintf(cmd.ErrOrStderr(), "agent tool call: %s\n", name)
-					}
-				}
 				printAnswerText(cmd.OutOrStdout(), result.Answer, result.Sources)
 				return nil
 			}

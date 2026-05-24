@@ -2,13 +2,13 @@ package cli
 
 import (
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 
 	"github.com/smasonuk/falken-core/pkg/falken"
 	falkenlangchain "github.com/smasonuk/falken-extra/llm/langchaingo"
 	"github.com/smasonuk/falken-vector/internal/llm"
+	"github.com/smasonuk/falken-vector/internal/openaihttp"
 	"github.com/tmc/langchaingo/llms/openai"
 )
 
@@ -62,9 +62,9 @@ func newCLIAgentLLMFromEnv(getenv func(string) string) (falken.LLM, error) {
 		return falkenlangchain.New(model), nil
 	}
 	options = append(options, openai.WithToken(apiKey))
-	if len(headers) != 0 {
-		options = append(options, openai.WithHTTPClient(falkenlangchain.NewHeaderHTTPClient(nil, headers)))
-	}
+	options = append(options, openai.WithHTTPClient(openaihttp.SuccessStatusClient{
+		Next: falkenlangchain.NewHeaderHTTPClient(nil, headers),
+	}))
 	model, err := openai.New(options...)
 	if err != nil {
 		return nil, fmt.Errorf("configure OpenAI-compatible agent LLM: %w", err)
@@ -76,9 +76,11 @@ func newOpenAIModelWithoutAPIKey(modelName, baseURL string, headers map[string]s
 	const placeholderToken = "unused-local-openai-compatible-token"
 	// LangChainGo requires a non-empty token during construction. Strip the
 	// placeholder before transport so local endpoints see no bearer auth.
-	httpClient := stripAuthorizationHTTPClient{
-		Next:             falkenlangchain.NewHeaderHTTPClient(nil, headers),
-		placeholderToken: placeholderToken,
+	httpClient := openaihttp.SuccessStatusClient{
+		Next: openaihttp.StripPlaceholderAuthorizationClient{
+			Next:             falkenlangchain.NewHeaderHTTPClient(nil, headers),
+			PlaceholderToken: placeholderToken,
+		},
 	}
 	return openai.New(
 		openai.WithToken(placeholderToken),
@@ -86,24 +88,4 @@ func newOpenAIModelWithoutAPIKey(modelName, baseURL string, headers map[string]s
 		openai.WithBaseURL(baseURL),
 		openai.WithHTTPClient(httpClient),
 	)
-}
-
-type stripAuthorizationHTTPClient struct {
-	Next interface {
-		Do(*http.Request) (*http.Response, error)
-	}
-	placeholderToken string
-}
-
-func (c stripAuthorizationHTTPClient) Do(req *http.Request) (*http.Response, error) {
-	next := c.Next
-	if next == nil {
-		next = http.DefaultClient
-	}
-	clone := req.Clone(req.Context())
-	clone.Header = req.Header.Clone()
-	if clone.Header.Get("Authorization") == "Bearer "+c.placeholderToken {
-		clone.Header.Del("Authorization")
-	}
-	return next.Do(clone)
 }

@@ -17,6 +17,7 @@ import (
 	internalconfig "github.com/smasonuk/falken-vector/internal/config"
 	"github.com/smasonuk/falken-vector/internal/llm"
 	"github.com/smasonuk/falken-vector/internal/manifest"
+	"github.com/smasonuk/falken-vector/internal/openaihttp"
 	"github.com/smasonuk/falken-vector/internal/rag"
 	"github.com/smasonuk/falken-vector/pkg/embeddings"
 	"github.com/tmc/langchaingo/llms/openai"
@@ -628,9 +629,9 @@ func (e *Engine) agentLLM() (falken.LLM, error) {
 	}
 	if apiKey := strings.TrimSpace(config.APIKey); apiKey != "" {
 		options = append(options, openai.WithToken(apiKey))
-		if e.config.HTTPClient != nil || len(config.Headers) != 0 {
-			options = append(options, openai.WithHTTPClient(falkenlangchain.NewHeaderHTTPClient(e.config.HTTPClient, config.Headers)))
-		}
+		options = append(options, openai.WithHTTPClient(openaihttp.SuccessStatusClient{
+			Next: falkenlangchain.NewHeaderHTTPClient(e.config.HTTPClient, config.Headers),
+		}))
 		model, err := openai.New(options...)
 		if err != nil {
 			return nil, fmt.Errorf("configure OpenAI-compatible agent LLM: %w", err)
@@ -648,9 +649,11 @@ func newOpenAIModelWithoutAPIKey(modelName, baseURL string, httpClient HTTPClien
 	const placeholderToken = "unused-local-openai-compatible-token"
 	// LangChainGo requires a non-empty token during construction. Strip the
 	// placeholder before transport so local endpoints see no bearer auth.
-	httpClientWithoutPlaceholderAuth := stripAuthorizationHTTPClient{
-		Next:             falkenlangchain.NewHeaderHTTPClient(httpClient, headers),
-		placeholderToken: placeholderToken,
+	httpClientWithoutPlaceholderAuth := openaihttp.SuccessStatusClient{
+		Next: openaihttp.StripPlaceholderAuthorizationClient{
+			Next:             falkenlangchain.NewHeaderHTTPClient(httpClient, headers),
+			PlaceholderToken: placeholderToken,
+		},
 	}
 	return openai.New(
 		openai.WithToken(placeholderToken),
@@ -658,26 +661,6 @@ func newOpenAIModelWithoutAPIKey(modelName, baseURL string, httpClient HTTPClien
 		openai.WithBaseURL(baseURL),
 		openai.WithHTTPClient(httpClientWithoutPlaceholderAuth),
 	)
-}
-
-type stripAuthorizationHTTPClient struct {
-	Next interface {
-		Do(*http.Request) (*http.Response, error)
-	}
-	placeholderToken string
-}
-
-func (c stripAuthorizationHTTPClient) Do(req *http.Request) (*http.Response, error) {
-	next := c.Next
-	if next == nil {
-		next = http.DefaultClient
-	}
-	clone := req.Clone(req.Context())
-	clone.Header = req.Header.Clone()
-	if clone.Header.Get("Authorization") == "Bearer "+c.placeholderToken {
-		clone.Header.Del("Authorization")
-	}
-	return next.Do(clone)
 }
 
 func (e *Engine) embeddingConfig() ModelConfig {

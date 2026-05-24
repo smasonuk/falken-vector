@@ -7,6 +7,7 @@ import (
 	"time"
 
 	falkenvector "github.com/smasonuk/falken-vector"
+	"github.com/smasonuk/falken-vector/internal/llm"
 )
 
 const helloInput = "Hello from Falken vector embeddings."
@@ -19,9 +20,9 @@ func main() {
 }
 
 func run() error {
-	apiKey := os.Getenv("PK")
+	apiKey := os.Getenv(llm.EnvEmbeddingModelAPIKey)
 	if apiKey == "" {
-		return fmt.Errorf("PK environment variable is required")
+		return fmt.Errorf("%s environment variable is required", llm.EnvEmbeddingModelAPIKey)
 	}
 
 	client, err := falkenvector.New(falkenvector.PortkeyConfig(apiKey))

@@ -14,14 +14,14 @@ import (
 )
 
 const (
-	EnvPortkeyAPIKey   = "PK"
-	EnvEmbeddingModel  = "FALKENGO_EMBEDDING_MODEL"
-	EnvBaseURL         = "FALKENGO_BASE_URL"
-	EnvLLMAPIKey       = "FALKENGO_LLM_API_KEY"
-	EnvLLMBaseURL      = "FALKENGO_LLM_BASE_URL"
-	EnvLLMModel        = "FALKENGO_LLM_MODEL"
-	DefaultChatModel   = "gpt-5.2"
-	defaultTemperature = 0.1
+	EnvEmbeddingModelAPIKey = "FALKENGO_EMBEDDING_MODEL_API_KEY"
+	EnvEmbeddingModel       = "FALKENGO_EMBEDDING_MODEL"
+	EnvEmbeddingModelURL    = "FALKENGO_EMBEDDING_MODEL_URL"
+	EnvLLMAPIKey            = "FALKENGO_LLM_API_KEY"
+	EnvLLMBaseURL           = "FALKENGO_LLM_BASE_URL"
+	EnvLLMModel             = "FALKENGO_LLM_MODEL"
+	DefaultChatModel        = "gpt-5.2"
+	defaultTemperature      = 0.1
 )
 
 var ErrMissingAPIKey = errors.New("api key is required")
@@ -36,15 +36,15 @@ func NewEnvEmbedder(getenv func(string) string) (*OpenAIEmbedder, error) {
 	if getenv == nil {
 		getenv = func(key string) string { return "" }
 	}
-	apiKey := strings.TrimSpace(getenv(EnvPortkeyAPIKey))
+	apiKey := strings.TrimSpace(getenv(EnvEmbeddingModelAPIKey))
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set %s", ErrMissingAPIKey, EnvPortkeyAPIKey)
+		return nil, fmt.Errorf("%w: set %s", ErrMissingAPIKey, EnvEmbeddingModelAPIKey)
 	}
 	config := falkenvector.PortkeyConfig(apiKey)
 	if model := strings.TrimSpace(getenv(EnvEmbeddingModel)); model != "" {
 		config.Model = model
 	}
-	if baseURL := strings.TrimSpace(getenv(EnvBaseURL)); baseURL != "" {
+	if baseURL := strings.TrimSpace(getenv(EnvEmbeddingModelURL)); baseURL != "" {
 		config.BaseURL = baseURL
 		if !isDefaultPortkeyBaseURL(baseURL) {
 			delete(config.Headers, "X-Portkey-Provider")
@@ -97,10 +97,10 @@ func NewEnvChatClient(getenv func(string) string) (*ChatClient, error) {
 	}
 	apiKey := strings.TrimSpace(getenv(EnvLLMAPIKey))
 	if apiKey == "" {
-		apiKey = strings.TrimSpace(getenv(EnvPortkeyAPIKey))
+		apiKey = strings.TrimSpace(getenv(EnvEmbeddingModelAPIKey))
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set %s or %s", ErrMissingAPIKey, EnvLLMAPIKey, EnvPortkeyAPIKey)
+		return nil, fmt.Errorf("%w: set %s or %s", ErrMissingAPIKey, EnvLLMAPIKey, EnvEmbeddingModelAPIKey)
 	}
 	baseURL := strings.TrimSpace(getenv(EnvLLMBaseURL))
 	if baseURL == "" {

@@ -51,7 +51,7 @@ func TestFindCandidateFilesFiltersExtensions(t *testing.T) {
 
 func TestFindCandidateFilesIncludesEnvExample(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, ".env.example"), "PK=example")
+	writeFile(t, filepath.Join(root, ".env.example"), "FALKENGO_EMBEDDING_MODEL_API_KEY=example")
 	files, err := FindCandidateFiles(context.Background(), WalkOptions{
 		Root:     root,
 		StateDir: filepath.Join(root, ".falkengo"),

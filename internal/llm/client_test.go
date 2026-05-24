@@ -99,9 +99,19 @@ func TestChatClientRequiresAPIKey(t *testing.T) {
 	}
 }
 
+func TestEnvEmbedderRequiresEmbeddingAPIKey(t *testing.T) {
+	_, err := NewEnvEmbedder(func(string) string { return "" })
+	if !errors.Is(err, ErrMissingAPIKey) {
+		t.Fatalf("NewEnvEmbedder error = %v, want missing API key", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), EnvEmbeddingModelAPIKey) {
+		t.Fatalf("NewEnvEmbedder error = %v, want %s guidance", err, EnvEmbeddingModelAPIKey)
+	}
+}
+
 func TestEnvChatClientOnlyAddsPortkeyHeaderForDefaultBaseURL(t *testing.T) {
 	defaultClient, err := NewEnvChatClient(func(key string) string {
-		if key == EnvPortkeyAPIKey {
+		if key == EnvEmbeddingModelAPIKey {
 			return "key"
 		}
 		return ""
@@ -115,7 +125,7 @@ func TestEnvChatClientOnlyAddsPortkeyHeaderForDefaultBaseURL(t *testing.T) {
 
 	customClient, err := NewEnvChatClient(func(key string) string {
 		switch key {
-		case EnvPortkeyAPIKey:
+		case EnvEmbeddingModelAPIKey:
 			return "key"
 		case EnvLLMBaseURL:
 			return "https://example.test/v1"

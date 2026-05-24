@@ -1,8 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -89,4 +92,61 @@ func TestAcquireWriteLockFailsWhenHeld(t *testing.T) {
 		second.Release()
 		t.Fatal("second lock succeeded, want error")
 	}
+}
+
+func TestAcquireWriteLockRemovesDeadProcessLock(t *testing.T) {
+	paths, err := ResolvePaths(filepath.Join(t.TempDir(), ".falkengo"))
+	if err != nil {
+		t.Fatalf("ResolvePaths: %v", err)
+	}
+	if err := EnsureStateDirs(paths); err != nil {
+		t.Fatalf("EnsureStateDirs: %v", err)
+	}
+	deadPID := exitedProcessPID(t)
+	if processRunning(deadPID) {
+		t.Skipf("platform cannot identify exited pid %d as stale", deadPID)
+	}
+	path := WriteLockPath(paths)
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("pid=%d\ncreated_at=2026-05-24T15:45:27Z\n", deadPID)), 0o600); err != nil {
+		t.Fatalf("write stale lock: %v", err)
+	}
+
+	lock, err := AcquireWriteLock(paths)
+	if err != nil {
+		t.Fatalf("AcquireWriteLock: %v", err)
+	}
+	defer lock.Release()
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if got := string(contents); got == "" || !containsPID(got, os.Getpid()) {
+		t.Fatalf("lock contents = %q, want current process pid", got)
+	}
+}
+
+func TestAcquireWriteLockHelperProcess(t *testing.T) {
+	if os.Getenv("FALKEN_VECTOR_LOCK_HELPER") != "1" {
+		return
+	}
+	os.Exit(0)
+}
+
+func exitedProcessPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestAcquireWriteLockHelperProcess")
+	cmd.Env = append(os.Environ(), "FALKEN_VECTOR_LOCK_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait helper process: %v", err)
+	}
+	return pid
+}
+
+func containsPID(contents string, pid int) bool {
+	return strings.Contains(contents, fmt.Sprintf("pid=%d", pid))
 }

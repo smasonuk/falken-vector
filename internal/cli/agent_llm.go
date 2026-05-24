@@ -38,10 +38,10 @@ func newCLIAgentLLMFromEnv(getenv func(string) string) (falken.LLM, error) {
 	}
 	apiKey := strings.TrimSpace(getenv(llm.EnvLLMAPIKey))
 	if apiKey == "" {
-		apiKey = strings.TrimSpace(getenv(llm.EnvPortkeyAPIKey))
+		apiKey = strings.TrimSpace(getenv(llm.EnvEmbeddingModelAPIKey))
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set %s or %s", llm.ErrMissingAPIKey, llm.EnvLLMAPIKey, llm.EnvPortkeyAPIKey)
+		return nil, fmt.Errorf("%w: set %s or %s", llm.ErrMissingAPIKey, llm.EnvLLMAPIKey, llm.EnvEmbeddingModelAPIKey)
 	}
 
 	baseURL := strings.TrimSpace(getenv(llm.EnvLLMBaseURL))

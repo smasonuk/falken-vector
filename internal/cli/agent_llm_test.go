@@ -16,6 +16,9 @@ func TestNewCLIAgentLLMMissingAPIKey(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), llm.EnvLLMAPIKey) {
 		t.Fatalf("error = %v, want clear env var guidance", err)
 	}
+	if err == nil || !strings.Contains(err.Error(), llm.EnvEmbeddingModelAPIKey) {
+		t.Fatalf("error = %v, want embedding key fallback guidance", err)
+	}
 }
 
 func TestNewCLIAgentLLMReadsAPIKey(t *testing.T) {

@@ -24,7 +24,7 @@ func newIngestCommand(opts *options) *cobra.Command {
 		Short: "Index text files from a directory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := commandContext(cmd, opts)
+			ctx, cancel := longRunningCommandContext(cmd, opts)
 			defer cancel()
 
 			paths, err := resolvePaths(opts)
@@ -68,10 +68,7 @@ func newIngestCommand(opts *options) *cobra.Command {
 
 			var embedder llm.Embedder
 			if !dryRun {
-				embedder, err = llm.NewEnvEmbedder(os.Getenv)
-				if err != nil {
-					return fmt.Errorf("configure embedder: %w", err)
-				}
+				embedder = &lazyEnvEmbedder{}
 			}
 			chunkerMode, err := ingest.ParseChunkerMode(chunker)
 			if err != nil {

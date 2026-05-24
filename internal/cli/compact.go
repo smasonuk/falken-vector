@@ -22,7 +22,7 @@ func newCompactCommand(opts *options) *cobra.Command {
 		Use:   "compact",
 		Short: "Rebuild the vector database from active manifest chunks",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, cancel := commandContext(cmd, opts)
+			ctx, cancel := longRunningCommandContext(cmd, opts)
 			defer cancel()
 
 			paths, err := resolvePaths(opts)

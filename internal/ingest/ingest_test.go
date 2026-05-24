@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -54,6 +55,51 @@ func TestRunIndexesAndSkipsUnchangedFiles(t *testing.T) {
 	}
 	if embedder.calls != 1 {
 		t.Fatalf("embed calls = %d, want 1", embedder.calls)
+	}
+}
+
+func TestRunPrintsProgressDuringIngest(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "note.txt"), "abcdefghij")
+	paths, err := config.ResolvePaths(filepath.Join(root, ".falkengo"))
+	if err != nil {
+		t.Fatalf("ResolvePaths: %v", err)
+	}
+	store := openTestManifest(t, paths.ManifestPath)
+	vector := &memoryVectorStore{}
+	var out bytes.Buffer
+
+	_, err = Run(ctx, store, Options{
+		Root:         root,
+		Paths:        paths,
+		ChunkSize:    5,
+		ChunkOverlap: 0,
+		ChunkerMode:  ChunkerModeFixed,
+		Embedder:     &fakeEmbedder{},
+		Out:          &out,
+		OpenVector: func(context.Context, string, int) (vectorstore.Store, error) {
+			return vector, nil
+		},
+		Now: func() time.Time { return time.Unix(15, 0).UTC() },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"scanning " + root,
+		"found 1 candidate files",
+		"indexing file 1/1: note.txt",
+		"embedding 2 chunks from note.txt with fixed chunker",
+		"embedded chunks for note.txt: 1/2",
+		"embedded chunks for note.txt: 2/2",
+		"committing vector database",
+		"updating manifest",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("progress output = %q, want to contain %q", got, want)
+		}
 	}
 }
 
@@ -704,6 +750,50 @@ func TestRunRefusesPendingIngestRuns(t *testing.T) {
 	}
 }
 
+func TestRunStopsOnEmbeddingDeadlineWithoutFailingFileOrSyncing(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	target := filepath.Join(root, "README.md")
+	writeFile(t, target, "abcdefghij")
+	paths, err := config.ResolvePaths(filepath.Join(root, ".falkengo"))
+	if err != nil {
+		t.Fatalf("ResolvePaths: %v", err)
+	}
+	sqliteStore := openTestManifest(t, paths.ManifestPath)
+	store := &trackingManifestStore{Store: sqliteStore}
+	vector := &memoryVectorStore{}
+	embedder := &deadlineAfterFirstEmbedder{}
+
+	summary, err := Run(ctx, store, Options{
+		Root:         root,
+		Paths:        paths,
+		ChunkSize:    5,
+		ChunkOverlap: 0,
+		ChunkerMode:  ChunkerModeFixed,
+		SyncSource:   true,
+		Embedder:     embedder,
+		OpenVector: func(context.Context, string, int) (vectorstore.Store, error) {
+			return vector, nil
+		},
+		Now: func() time.Time { return time.Unix(120, 0).UTC() },
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "ingest stopped: context deadline exceeded") {
+		t.Fatalf("Run error = %v, want ingest stopped deadline", err)
+	}
+	if summary.FailedFiles != 0 || summary.ChunksEmbedded != 0 {
+		t.Fatalf("summary = %+v, want no failed file or completed chunks", summary)
+	}
+	if store.listIndexedCalled {
+		t.Fatal("ListIndexedDocumentsUnderRoot called after embedding deadline")
+	}
+	if store.markErrorCalled || store.upsertCalled {
+		t.Fatalf("store writes after embedding deadline: markError=%t upsert=%t", store.markErrorCalled, store.upsertCalled)
+	}
+	if _, err := sqliteStore.GetDocumentByPath(ctx, target); !errors.Is(err, manifest.ErrNotFound) {
+		t.Fatalf("GetDocumentByPath error = %v, want no document row after deadline", err)
+	}
+}
+
 func openTestManifest(t *testing.T, path string) *manifest.SQLiteStore {
 	t.Helper()
 	if err := config.EnsureStateDirs(config.Paths{StateDir: filepath.Dir(path), LocksPath: filepath.Join(filepath.Dir(path), "locks")}); err != nil {
@@ -746,6 +836,18 @@ func (failingEmbedder) EmbedText(context.Context, string) (llm.Embedding, error)
 	return llm.Embedding{}, errors.New("embed failed")
 }
 
+type deadlineAfterFirstEmbedder struct {
+	calls int
+}
+
+func (e *deadlineAfterFirstEmbedder) EmbedText(_ context.Context, input string) (llm.Embedding, error) {
+	e.calls++
+	if e.calls > 1 {
+		return llm.Embedding{}, context.DeadlineExceeded
+	}
+	return llm.Embedding{Model: "fake", Vector: []float32{float32(len(input)), 1, 0}}, nil
+}
+
 type failingDecisionStore struct {
 	manifest.EmptyStore
 	err             error
@@ -759,6 +861,28 @@ func (s *failingDecisionStore) GetDocumentByPath(context.Context, string) (*mani
 func (s *failingDecisionStore) MarkDocumentError(context.Context, string, string) error {
 	s.markErrorCalled = true
 	return nil
+}
+
+type trackingManifestStore struct {
+	manifest.Store
+	listIndexedCalled bool
+	markErrorCalled   bool
+	upsertCalled      bool
+}
+
+func (s *trackingManifestStore) ListIndexedDocumentsUnderRoot(ctx context.Context, sourceRoot string) ([]manifest.Document, error) {
+	s.listIndexedCalled = true
+	return s.Store.ListIndexedDocumentsUnderRoot(ctx, sourceRoot)
+}
+
+func (s *trackingManifestStore) MarkDocumentError(ctx context.Context, path string, errText string) error {
+	s.markErrorCalled = true
+	return s.Store.MarkDocumentError(ctx, path, errText)
+}
+
+func (s *trackingManifestStore) UpsertDocument(ctx context.Context, doc manifest.Document) error {
+	s.upsertCalled = true
+	return s.Store.UpsertDocument(ctx, doc)
 }
 
 type memoryVectorStore struct {

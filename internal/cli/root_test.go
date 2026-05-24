@@ -13,6 +13,7 @@ import (
 
 	"github.com/smasonuk/falken-vector/internal/config"
 	"github.com/smasonuk/falken-vector/internal/manifest"
+	"github.com/spf13/cobra"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -38,6 +39,54 @@ func TestHelpCommand(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "ingest") || !strings.Contains(out.String(), "query") || !strings.Contains(out.String(), "compact") || !strings.Contains(out.String(), "eval") {
 		t.Fatalf("help output = %q", out.String())
+	}
+}
+
+func TestCommandContextUsesDefaultTimeout(t *testing.T) {
+	cmd := NewRootCommand()
+	ctx, cancel := commandContext(cmd, &options{timeout: config.DefaultTimeout})
+	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("commandContext has no deadline, want default timeout deadline")
+	}
+}
+
+func TestLongRunningCommandContextHasNoDefaultDeadline(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cmd  func(*options) any
+	}{
+		{name: "ingest", cmd: func(opts *options) any { return newIngestCommand(opts) }},
+		{name: "compact", cmd: func(opts *options) any { return newCompactCommand(opts) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &options{timeout: config.DefaultTimeout}
+			cmd := tt.cmd(opts).(*cobra.Command)
+			ctx, cancel := longRunningCommandContext(cmd, opts)
+			defer cancel()
+			if _, ok := ctx.Deadline(); ok {
+				t.Fatal("longRunningCommandContext has deadline, want none without explicit --timeout")
+			}
+		})
+	}
+}
+
+func TestLongRunningCommandContextHonorsExplicitTimeout(t *testing.T) {
+	opts := &options{timeout: time.Millisecond}
+	cmd := NewRootCommand()
+	flag := cmd.PersistentFlags().Lookup("timeout")
+	if flag == nil {
+		t.Fatal("timeout flag not found")
+	}
+	if err := flag.Value.Set(opts.timeout.String()); err != nil {
+		t.Fatalf("set timeout flag: %v", err)
+	}
+	flag.Changed = true
+
+	ctx, cancel := longRunningCommandContext(cmd, opts)
+	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("longRunningCommandContext has no deadline, want explicit timeout deadline")
 	}
 }
 

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"os"
+	"os/signal"
 	"time"
 
 	"github.com/smasonuk/falken-vector/internal/config"
@@ -15,7 +17,12 @@ type options struct {
 }
 
 func Execute() error {
-	return NewRootCommand().Execute()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	cmd := NewRootCommand()
+	cmd.SetContext(ctx)
+	return cmd.Execute()
 }
 
 func NewRootCommand() *cobra.Command {
@@ -31,7 +38,7 @@ func NewRootCommand() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
 	cmd.PersistentFlags().StringVar(&opts.stateDir, "state-dir", config.DefaultStateDir, "local application state directory")
-	cmd.PersistentFlags().DurationVar(&opts.timeout, "timeout", config.DefaultTimeout, "operation timeout")
+	cmd.PersistentFlags().DurationVar(&opts.timeout, "timeout", config.DefaultTimeout, "operation timeout; for ingest and compact this is only applied when explicitly set")
 	cmd.PersistentFlags().BoolVar(&opts.verbose, "verbose", false, "print detailed progress")
 
 	cmd.AddCommand(newIngestCommand(opts))
@@ -52,6 +59,35 @@ func commandContext(cmd *cobra.Command, opts *options) (context.Context, context
 		ctx = context.Background()
 	}
 	return context.WithTimeout(ctx, opts.timeout)
+}
+
+func longRunningCommandContext(cmd *cobra.Command, opts *options) (context.Context, context.CancelFunc) {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeoutFlagChanged(cmd) {
+		return context.WithTimeout(ctx, opts.timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
+func timeoutFlagChanged(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if flag := cmd.Flags().Lookup("timeout"); flag != nil {
+		return flag.Changed
+	}
+	if flag := cmd.InheritedFlags().Lookup("timeout"); flag != nil {
+		return flag.Changed
+	}
+	if root := cmd.Root(); root != nil {
+		if flag := root.PersistentFlags().Lookup("timeout"); flag != nil {
+			return flag.Changed
+		}
+	}
+	return false
 }
 
 func resolvePaths(opts *options) (config.Paths, error) {

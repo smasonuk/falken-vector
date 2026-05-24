@@ -1,6 +1,7 @@
 package retrievaleval
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -48,6 +49,25 @@ func TestLoadJSONLTrimsBlankExpectationEntries(t *testing.T) {
 	_, err := LoadJSONL(strings.NewReader(`{"question":"hello","expected_chunk_ids":[" "]}`))
 	if err == nil || !strings.Contains(err.Error(), "line 1: at least one") {
 		t.Fatalf("LoadJSONL error = %v, want missing expectations after trimming", err)
+	}
+}
+
+func TestLoadJSONLAlphaFoldFixture(t *testing.T) {
+	file, err := os.Open("testdata/alphafold/retrieval-eval.jsonl")
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	defer file.Close()
+
+	cases, err := LoadJSONL(file)
+	if err != nil {
+		t.Fatalf("LoadJSONL fixture: %v", err)
+	}
+	if len(cases) != 1 || cases[0].ID != "alphafold-broad-summary" {
+		t.Fatalf("cases = %+v, want alphafold broad summary fixture", cases)
+	}
+	if len(cases[0].ExpectedPathSuffixes) != 3 {
+		t.Fatalf("expected path suffixes = %+v, want three topic clusters", cases[0].ExpectedPathSuffixes)
 	}
 }
 

@@ -79,6 +79,30 @@ func (r *CitationRegistry) SourceByNumber(n int) (rag.SourceChunk, bool) {
 	return source, ok
 }
 
+func (r *CitationRegistry) ExpandSource(sourceNumber int, startLine int, endLine int, text string) error {
+	if r == nil {
+		return fmt.Errorf("citation registry is nil")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	source, ok := r.byNumber[sourceNumber]
+	if !ok {
+		return fmt.Errorf("unknown source [source %d]", sourceNumber)
+	}
+	source.StartLine = startLine
+	source.EndLine = endLine
+	source.Text = text
+	r.byNumber[sourceNumber] = source
+	for key, existing := range r.byKey {
+		if existing.SourceNumber == sourceNumber {
+			r.byKey[key] = source
+			break
+		}
+	}
+	return nil
+}
+
 func (r *CitationRegistry) SourceCount() int {
 	if r == nil {
 		return 0

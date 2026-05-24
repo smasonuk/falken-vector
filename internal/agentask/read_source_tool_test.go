@@ -84,6 +84,31 @@ func TestReadIndexSourceToolUsesSameSourceNumber(t *testing.T) {
 	}
 }
 
+func TestReadIndexSourceToolExpandsRegisteredSourceRange(t *testing.T) {
+	file := writeReadSourceFile(t, numberedLines(40))
+	registry := NewCitationRegistry()
+	registry.Register(readSourceRetrievedChunk(file, 10, 12))
+	tool := NewReadIndexSourceTool(ReadSourceToolOptions{Registry: registry})
+
+	result := executeReadSourceTool(t, tool, `{"source_number":1,"context_lines":20}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	source, ok := registry.SourceByNumber(1)
+	if !ok {
+		t.Fatal("source 1 missing after expansion")
+	}
+	if source.StartLine != 1 || source.EndLine != 32 {
+		t.Fatalf("source lines = %d-%d, want expanded 1-32", source.StartLine, source.EndLine)
+	}
+	if !strings.Contains(source.Text, "line 1") || !strings.Contains(source.Text, "line 32") {
+		t.Fatalf("source text = %q, want expanded context text", source.Text)
+	}
+	if registry.SourceCount() != 1 {
+		t.Fatalf("source count = %d, want same source number", registry.SourceCount())
+	}
+}
+
 func TestReadIndexSourceToolMissingFileFailsCleanly(t *testing.T) {
 	registry := NewCitationRegistry()
 	registry.Register(testRetrievedChunk("chunk-1", filepath.Join(t.TempDir(), "missing.go"), "text", "hidden"))

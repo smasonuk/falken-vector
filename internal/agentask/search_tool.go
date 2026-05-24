@@ -56,6 +56,7 @@ type searchIndexArgs struct {
 	Query     string `json:"query"`
 	TopK      *int   `json:"top_k"`
 	Retrieval string `json:"retrieval"`
+	Strategy  string `json:"strategy"`
 }
 
 func NewSearchIndexTool(opts SearchToolOptions) falken.Tool {
@@ -87,6 +88,11 @@ func searchIndexDescriptor() falken.ToolDescriptor {
       "type": "string",
       "enum": ["vector", "lexical", "hybrid"],
       "description": "Optional retrieval mode override for this search. Defaults to the CLI --retrieval value."
+    },
+    "strategy": {
+      "type": "string",
+      "enum": ["focused", "broad"],
+      "description": "Search strategy. focused runs the requested query. broad expands from first-pass source terms and fuses follow-up results."
     }
   }
 }`),
@@ -118,6 +124,10 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	if err != nil {
 		return failedSearchToolResult("invalid_retrieval", err.Error(), nil), nil
 	}
+	strategy, err := normalizeSearchStrategy(args.Strategy)
+	if err != nil {
+		return failedSearchToolResult("invalid_strategy", err.Error(), nil), nil
+	}
 
 	s.mu.Lock()
 	if s.calls >= maxSearchCalls {
@@ -127,45 +137,25 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	s.calls++
 	s.mu.Unlock()
 
-	retrieveOpts.Question = query
-	retrieveOpts.TopK = topK
-	retrieveOpts.Mode = mode
-	retrieveOpts.Paths = s.opts.Paths
-
-	if err := rag.CheckIndexForMode(retrieveOpts.Paths, retrieveOpts.Mode); err != nil {
-		return failedSearchToolResult("index_unavailable", err.Error(), nil), nil
+	retrieveOpts, result, failure, ok := s.retrieveOnce(ctx, retrieveOpts, query, topK, mode)
+	if !ok {
+		return failure, nil
 	}
-	if rag.RetrievalModeUsesLexical(retrieveOpts.Mode) && s.opts.PrepareLexicalIndex != nil {
-		if err := s.opts.PrepareLexicalIndex(ctx, s.opts.Store, retrieveOpts.Mode); err != nil {
-			return failedSearchToolResult("prepare_lexical_index_failed", err.Error(), nil), nil
+	expansionQueries := []string{}
+	if strategy == "broad" && len(result.Chunks) != 0 {
+		seedSources := sourceChunksFromRetrieved(result.Chunks)
+		expansionQueries = SuggestFollowupQueries(query, seedSources, 3)
+		if len(expansionQueries) != 0 {
+			results := []rag.RetrieveResult{result}
+			for _, expansionQuery := range expansionQueries {
+				_, expansionResult, failure, ok := s.retrieveOnce(ctx, s.opts.RetrievalDefaults, expansionQuery, topK, mode)
+				if !ok {
+					return failure, nil
+				}
+				results = append(results, expansionResult)
+			}
+			result = mergeBroadSearchResults(results, retrieveOpts.TopK)
 		}
-	}
-	if rag.RetrievalModeUsesVector(retrieveOpts.Mode) {
-		if s.opts.EmbedderFactory == nil {
-			return failedSearchToolResult("missing_embedder_factory", "embedder factory is required for vector retrieval", nil), nil
-		}
-		embedder, err := s.opts.EmbedderFactory()
-		if err != nil {
-			return failedSearchToolResult("configure_embedder_failed", err.Error(), nil), nil
-		}
-		retrieveOpts.Embedder = embedder
-	}
-	if s.opts.ConfigureQueryPlanner != nil {
-		if err := s.opts.ConfigureQueryPlanner(&retrieveOpts); err != nil {
-			return failedSearchToolResult("configure_query_planner_failed", err.Error(), nil), nil
-		}
-	}
-	retrieveOpts, err = rag.NormalizeRetrieveOptions(retrieveOpts)
-	if err != nil {
-		return failedSearchToolResult("invalid_options", err.Error(), nil), nil
-	}
-	retrieveWithPlan := s.opts.RetrieveWithPlan
-	if retrieveWithPlan == nil {
-		retrieveWithPlan = rag.RetrieveWithPlan
-	}
-	result, err := retrieveWithPlan(ctx, s.opts.Store, retrieveOpts)
-	if err != nil {
-		return failedSearchToolResult("retrieval_failed", err.Error(), nil), nil
 	}
 
 	sources := make([]searchSourcePayload, 0, len(result.Chunks))
@@ -187,16 +177,18 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 		Success:   true,
 		Status:    "ok",
 		Query:     query,
+		Strategy:  strategy,
 		Retrieval: string(retrieveOpts.Mode),
 		TopK:      retrieveOpts.TopK,
 		QueryPlan: searchQueryPlanPayload{
 			Mode:    result.Plan.Mode,
 			Queries: append([]string(nil), result.Plan.Queries...),
 		},
-		Sources:  sources,
-		Warnings: warnings,
+		ExpansionQueries: expansionQueries,
+		Sources:          sources,
+		Warnings:         warnings,
 	}
-	return successfulSearchToolResult(renderSearchToolContent(query, result.Plan, sources, warnings), payload), nil
+	return successfulSearchToolResult(renderSearchToolContent(query, strategy, result.Plan, expansionQueries, sources, warnings), payload), nil
 }
 
 func decodeSearchIndexArgs(raw json.RawMessage) (searchIndexArgs, error) {
@@ -217,8 +209,13 @@ func normalizeSearchTopK(value *int, defaultTopK, maxTopK int) (int, []string) {
 	if value != nil {
 		topK = *value
 	}
+	warnings := []string{}
 	if topK <= 0 {
 		topK = defaultTopK
+	}
+	if value != nil && *value > 0 && defaultTopK > 0 && topK < defaultTopK {
+		topK = defaultTopK
+		warnings = append(warnings, fmt.Sprintf("top_k raised to configured floor %d", defaultTopK))
 	}
 	if topK <= 0 {
 		topK = 8
@@ -227,9 +224,10 @@ func normalizeSearchTopK(value *int, defaultTopK, maxTopK int) (int, []string) {
 		maxTopK = 20
 	}
 	if topK > maxTopK {
-		return maxTopK, []string{fmt.Sprintf("top_k capped at %d", maxTopK)}
+		warnings = append(warnings, fmt.Sprintf("top_k capped at %d", maxTopK))
+		return maxTopK, warnings
 	}
-	return topK, nil
+	return topK, warnings
 }
 
 func normalizeSearchMode(value string, defaultMode rag.RetrievalMode) (rag.RetrievalMode, error) {
@@ -239,13 +237,137 @@ func normalizeSearchMode(value string, defaultMode rag.RetrievalMode) (rag.Retri
 	return rag.ParseRetrievalMode(value)
 }
 
-func renderSearchToolContent(query string, plan rag.QueryPlan, sources []searchSourcePayload, warnings []string) string {
+func normalizeSearchStrategy(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "focused", nil
+	}
+	switch value {
+	case "focused", "broad":
+		return value, nil
+	default:
+		return "", fmt.Errorf("invalid search strategy %q", value)
+	}
+}
+
+func (s *searchIndexToolState) retrieveOnce(ctx context.Context, retrieveOpts rag.RetrieveOptions, query string, topK int, mode rag.RetrievalMode) (rag.RetrieveOptions, rag.RetrieveResult, falken.ToolExecutionResult, bool) {
+	retrieveOpts.Question = query
+	retrieveOpts.TopK = topK
+	retrieveOpts.Mode = mode
+	retrieveOpts.Paths = s.opts.Paths
+
+	if err := rag.CheckIndexForMode(retrieveOpts.Paths, retrieveOpts.Mode); err != nil {
+		return rag.RetrieveOptions{}, rag.RetrieveResult{}, failedSearchToolResult("index_unavailable", err.Error(), nil), false
+	}
+	if rag.RetrievalModeUsesLexical(retrieveOpts.Mode) && s.opts.PrepareLexicalIndex != nil {
+		if err := s.opts.PrepareLexicalIndex(ctx, s.opts.Store, retrieveOpts.Mode); err != nil {
+			return rag.RetrieveOptions{}, rag.RetrieveResult{}, failedSearchToolResult("prepare_lexical_index_failed", err.Error(), nil), false
+		}
+	}
+	if rag.RetrievalModeUsesVector(retrieveOpts.Mode) {
+		if s.opts.EmbedderFactory == nil {
+			return rag.RetrieveOptions{}, rag.RetrieveResult{}, failedSearchToolResult("missing_embedder_factory", "embedder factory is required for vector retrieval", nil), false
+		}
+		embedder, err := s.opts.EmbedderFactory()
+		if err != nil {
+			return rag.RetrieveOptions{}, rag.RetrieveResult{}, failedSearchToolResult("configure_embedder_failed", err.Error(), nil), false
+		}
+		retrieveOpts.Embedder = embedder
+	}
+	if s.opts.ConfigureQueryPlanner != nil {
+		if err := s.opts.ConfigureQueryPlanner(&retrieveOpts); err != nil {
+			return rag.RetrieveOptions{}, rag.RetrieveResult{}, failedSearchToolResult("configure_query_planner_failed", err.Error(), nil), false
+		}
+	}
+	normalized, err := rag.NormalizeRetrieveOptions(retrieveOpts)
+	if err != nil {
+		return rag.RetrieveOptions{}, rag.RetrieveResult{}, failedSearchToolResult("invalid_options", err.Error(), nil), false
+	}
+	retrieveWithPlan := s.opts.RetrieveWithPlan
+	if retrieveWithPlan == nil {
+		retrieveWithPlan = rag.RetrieveWithPlan
+	}
+	result, err := retrieveWithPlan(ctx, s.opts.Store, normalized)
+	if err != nil {
+		return rag.RetrieveOptions{}, rag.RetrieveResult{}, failedSearchToolResult("retrieval_failed", err.Error(), nil), false
+	}
+	return normalized, result, falken.ToolExecutionResult{}, true
+}
+
+func sourceChunksFromRetrieved(chunks []rag.RetrievedChunk) []rag.SourceChunk {
+	sources := make([]rag.SourceChunk, 0, len(chunks))
+	for i, chunk := range chunks {
+		sources = append(sources, rag.SourceChunk{
+			SourceNumber: i + 1,
+			Path:         chunk.Path,
+			StartLine:    chunk.Chunk.StartLine,
+			EndLine:      chunk.Chunk.EndLine,
+			Text:         chunk.Chunk.ChunkText,
+			Score:        chunk.Score,
+		})
+	}
+	return sources
+}
+
+func mergeBroadSearchResults(results []rag.RetrieveResult, topK int) rag.RetrieveResult {
+	merged := rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "broad"}}
+	seen := map[string]struct{}{}
+	for _, result := range results {
+		if merged.Plan.Mode == "broad" && result.Plan.Mode != "" {
+			merged.Plan.Mode = result.Plan.Mode
+		}
+		merged.Plan.Queries = append(merged.Plan.Queries, result.Plan.Queries...)
+	}
+
+	maxLen := 0
+	for _, result := range results {
+		if len(result.Chunks) > maxLen {
+			maxLen = len(result.Chunks)
+		}
+	}
+	for rank := 0; rank < maxLen; rank++ {
+		for _, result := range results {
+			if rank >= len(result.Chunks) {
+				continue
+			}
+			chunk := result.Chunks[rank]
+			key := retrievedChunkKey(chunk)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged.Chunks = append(merged.Chunks, chunk)
+			if topK > 0 && len(merged.Chunks) >= topK {
+				return merged
+			}
+		}
+	}
+	return merged
+}
+
+func retrievedChunkKey(chunk rag.RetrievedChunk) string {
+	if chunk.Chunk.ID != "" {
+		return "chunk:" + chunk.Chunk.ID
+	}
+	return fmt.Sprintf("fallback:%s:%d:%d:%s", chunk.Path, chunk.Chunk.StartLine, chunk.Chunk.EndLine, chunk.Chunk.ChunkText)
+}
+
+func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, expansionQueries []string, sources []searchSourcePayload, warnings []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Found %d source chunks for query: %s\n", len(sources), query)
+	if strategy != "" && strategy != "focused" {
+		fmt.Fprintf(&b, "Strategy: %s\n", strategy)
+	}
 	if len(warnings) != 0 {
 		b.WriteString("\nWarnings:\n")
 		for _, warning := range warnings {
 			fmt.Fprintf(&b, "- %s\n", warning)
+		}
+	}
+	if len(expansionQueries) != 0 {
+		b.WriteString("\nBroad search expansion queries:\n")
+		for i, expansionQuery := range expansionQueries {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, expansionQuery)
 		}
 	}
 	if len(plan.Queries) != 0 {
@@ -303,15 +425,17 @@ func marshalSearchToolPayload(payload searchToolPayload) json.RawMessage {
 }
 
 type searchToolPayload struct {
-	Success   bool                   `json:"success"`
-	Status    string                 `json:"status"`
-	Query     string                 `json:"query,omitempty"`
-	Retrieval string                 `json:"retrieval,omitempty"`
-	TopK      int                    `json:"top_k,omitempty"`
-	QueryPlan searchQueryPlanPayload `json:"query_plan,omitempty"`
-	Sources   []searchSourcePayload  `json:"sources,omitempty"`
-	Warnings  []string               `json:"warnings"`
-	Error     string                 `json:"error,omitempty"`
+	Success          bool                   `json:"success"`
+	Status           string                 `json:"status"`
+	Query            string                 `json:"query,omitempty"`
+	Strategy         string                 `json:"strategy,omitempty"`
+	Retrieval        string                 `json:"retrieval,omitempty"`
+	TopK             int                    `json:"top_k,omitempty"`
+	QueryPlan        searchQueryPlanPayload `json:"query_plan,omitempty"`
+	ExpansionQueries []string               `json:"expansion_queries,omitempty"`
+	Sources          []searchSourcePayload  `json:"sources,omitempty"`
+	Warnings         []string               `json:"warnings"`
+	Error            string                 `json:"error,omitempty"`
 }
 
 type searchQueryPlanPayload struct {

@@ -32,6 +32,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if opts.MaxToolTopK <= 0 {
 		opts.MaxToolTopK = 20
 	}
+	coveragePolicy := normalizeCoveragePolicy(opts)
 
 	registry := NewCitationRegistry()
 	searchTool := NewSearchIndexTool(SearchToolOptions{
@@ -52,9 +53,14 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	var capturedToolCalls []string
+	trace := AgentTrace{}
 	events := func(event falken.Event) {
 		if event.ToolCall != nil {
 			capturedToolCalls = append(capturedToolCalls, event.ToolCall.Name)
+			trace.ToolCalls = append(trace.ToolCalls, toolCallRecord(*event.ToolCall))
+		}
+		if event.ToolResult != nil {
+			trace.ToolResults = append(trace.ToolResults, toolResultRecord(*event.ToolResult))
 		}
 		if opts.Events != nil {
 			opts.Events(event)
@@ -84,6 +90,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Answer:    answer,
 		Sources:   registry.Sources(),
 		ToolCalls: append([]string(nil), capturedToolCalls...),
+		Trace:     cloneAgentTrace(trace),
 	}
 	policy := normalizeAgentCitationPolicy(opts.CitationPolicy)
 	if policy == rag.CitationPolicyOff {
@@ -111,11 +118,41 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		result.Answer = retryAnswer
 		result.Sources = registry.Sources()
 		result.ToolCalls = append([]string(nil), capturedToolCalls...)
+		result.Trace = cloneAgentTrace(trace)
 		return validateRetryResult(&result, registry)
 	}
 	if validation.Valid {
-		result.CitationValid = true
-		return result, nil
+		coverageRetries := 0
+		for {
+			stats := searchStats(trace)
+			decision := coverageNudgeDecision(opts.Question, coveragePolicy, stats.SearchCalls, stats.SuccessfulSearchCalls, len(result.Sources), opts.MaxSearchCalls, coverageRetries)
+			if !decision.Nudge {
+				if warning := coverageSkippedWarning(decision.Reason); warning != "" {
+					result.CoverageWarnings = append(result.CoverageWarnings, warning)
+				}
+				result.CitationValid = true
+				return result, nil
+			}
+			result.CoverageWarnings = append(result.CoverageWarnings, coverageNudgeWarning(stats.SuccessfulSearchCalls, decision.RemainingNeeded))
+			retryAnswer, err := agent.Run(ctx, coverageNudgePrompt(opts.Question, answer, stats.SuccessfulSearchCalls, decision.RemainingNeeded))
+			if err != nil {
+				result.CitationWarnings = append(result.CitationWarnings, "coverage nudge failed: "+err.Error())
+				result.CitationValid = true
+				return result, nil
+			}
+			coverageRetries++
+			result.Retried = true
+			result.CoverageNudged = true
+			result.Answer = retryAnswer
+			result.Sources = registry.Sources()
+			result.ToolCalls = append([]string(nil), capturedToolCalls...)
+			result.Trace = cloneAgentTrace(trace)
+			validation = registry.Validate(result.Answer)
+			if !validation.Valid || unsupportedZeroSourceAnswer(validation, result.Sources, result.ToolCalls, result.Answer) {
+				return validateRetryResult(&result, registry)
+			}
+			answer = result.Answer
+		}
 	}
 
 	result.CitationWarnings = append(result.CitationWarnings, validation.Warnings...)
@@ -132,6 +169,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	result.Answer = retryAnswer
 	result.Sources = registry.Sources()
 	result.ToolCalls = append([]string(nil), capturedToolCalls...)
+	result.Trace = cloneAgentTrace(trace)
 	return validateRetryResult(&result, registry)
 }
 

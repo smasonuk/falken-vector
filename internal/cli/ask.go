@@ -30,6 +30,11 @@ func newAskCommand(opts *options) *cobra.Command {
 	var noCitationRetry bool
 	var agentMode bool
 	var showAgentTools bool
+	var agentCoverageNudge bool
+	var noAgentCoverageNudge bool
+	var minAgentSearches int
+	var maxAgentCoverageRetries int
+	var agentReadSourceTool bool
 	var maxAgentSearches int
 	var retrievalFlags retrievalFlagValues
 	var sourceFlags sourceFilterFlagValues
@@ -70,6 +75,10 @@ func newAskCommand(opts *options) *cobra.Command {
 			defer store.Close()
 			citationPolicy := citationPolicyFromFlags(noCitationValidation, noCitationRetry)
 			if agentMode {
+				coverageNudge, err := agentCoverageNudgeFromFlags(agentCoverageNudge, noAgentCoverageNudge)
+				if err != nil {
+					return err
+				}
 				retrievalOpts.TopK = topK
 				retrievalOpts.Paths = paths
 				agentLLM, err := newCLIAgentLLMWithModel(model)
@@ -88,12 +97,14 @@ func newAskCommand(opts *options) *cobra.Command {
 					ConfigureQueryPlanner: configureQueryPlanner,
 					CitationPolicy:        citationPolicy,
 					MaxSearchCalls:        maxAgentSearches,
+					CoverageNudge:         coverageNudge,
+					MinBroadSearchCalls:   minAgentSearches,
+					MaxCoverageRetries:    maxAgentCoverageRetries,
+					EnableReadSourceTool:  agentReadSourceTool,
 				}
 				if showAgentTools {
 					agentOptions.Events = func(event falken.Event) {
-						if event.ToolCall != nil {
-							fmt.Fprintf(cmd.ErrOrStderr(), "agent tool call: %s %s\n", event.ToolCall.Name, formatAgentToolArguments(event.ToolCall.Arguments))
-						}
+						printAgentToolEvent(cmd.ErrOrStderr(), event)
 					}
 				}
 				result, err := runAgentAsk(ctx, agentOptions)
@@ -104,6 +115,9 @@ func newAskCommand(opts *options) *cobra.Command {
 					if err := openAnswerSource(cmd.ErrOrStderr(), result.Sources, openSource); err != nil {
 						return err
 					}
+				}
+				if showAgentTools {
+					printCoverageWarnings(cmd.ErrOrStderr(), result.CoverageWarnings)
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
 				printAnswerText(cmd.OutOrStdout(), result.Answer, result.Sources)
@@ -174,8 +188,13 @@ func newAskCommand(opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&noCitationValidation, "no-citation-validation", false, "disable answer citation validation")
 	cmd.Flags().BoolVar(&noCitationRetry, "no-citation-retry", false, "disable stricter citation retry")
 	cmd.Flags().BoolVar(&agentMode, "agent", false, "use a Falken agent with a search_index tool instead of pre-attaching retrieved chunks")
-	cmd.Flags().BoolVar(&showAgentTools, "show-agent-tools", false, "print agent tool calls to stderr")
+	cmd.Flags().BoolVar(&showAgentTools, "show-agent-tools", false, "print agent tool calls and compact tool results to stderr")
 	cmd.Flags().IntVar(&maxAgentSearches, "max-agent-searches", 6, "maximum number of search_index calls allowed during one agent ask run")
+	cmd.Flags().BoolVar(&agentCoverageNudge, "agent-coverage-nudge", false, "enable broad-question coverage nudging in agent mode")
+	cmd.Flags().BoolVar(&noAgentCoverageNudge, "no-agent-coverage-nudge", false, "disable broad-question coverage nudging in agent mode")
+	cmd.Flags().IntVar(&minAgentSearches, "min-agent-searches", 0, "minimum successful search_index calls for broad agent questions")
+	cmd.Flags().IntVar(&maxAgentCoverageRetries, "max-agent-coverage-retries", 0, "maximum broad-question coverage retries in agent mode")
+	cmd.Flags().BoolVar(&agentReadSourceTool, "agent-read-source-tool", false, "enable the read_index_source tool in agent mode")
 	addRetrievalFlags(cmd, &retrievalFlags)
 	addSourceFilterFlags(cmd, &sourceFlags)
 	return cmd
@@ -199,6 +218,12 @@ func printCitationWarnings(w io.Writer, warnings []string) {
 	}
 }
 
+func printCoverageWarnings(w io.Writer, warnings []string) {
+	for _, warning := range warnings {
+		fmt.Fprintf(w, "agent %s\n", warning)
+	}
+}
+
 func citationPolicyFromFlags(noCitationValidation, noCitationRetry bool) rag.CitationPolicy {
 	if noCitationValidation {
 		return rag.CitationPolicyOff
@@ -207,6 +232,21 @@ func citationPolicyFromFlags(noCitationValidation, noCitationRetry bool) rag.Cit
 		return rag.CitationPolicyValidateOnly
 	}
 	return rag.CitationPolicyValidateAndRetry
+}
+
+func agentCoverageNudgeFromFlags(enable, disable bool) (*bool, error) {
+	if enable && disable {
+		return nil, errors.New("--agent-coverage-nudge and --no-agent-coverage-nudge cannot both be set")
+	}
+	if enable {
+		value := true
+		return &value, nil
+	}
+	if disable {
+		value := false
+		return &value, nil
+	}
+	return nil, nil
 }
 
 func checkAgentAskManifest(manifestPath string) error {

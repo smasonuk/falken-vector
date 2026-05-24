@@ -38,6 +38,14 @@ func TestSearchIndexToolRejectsInvalidRetrievalMode(t *testing.T) {
 	}
 }
 
+func TestSearchIndexToolRejectsInvalidStrategy(t *testing.T) {
+	tool := NewSearchIndexTool(SearchToolOptions{})
+	result := executeSearchTool(t, tool, `{"query":"hello","strategy":"wandering"}`)
+	if result.Success || result.Status != "invalid_strategy" {
+		t.Fatalf("result = %+v, want invalid strategy failure", result)
+	}
+}
+
 func TestSearchIndexToolLexicalDoesNotConstructEmbedder(t *testing.T) {
 	paths := searchToolTestPaths(t, false)
 	calledEmbedder := false
@@ -154,6 +162,60 @@ func TestSearchIndexToolTopKIsCapped(t *testing.T) {
 	}
 }
 
+func TestSearchIndexToolTopKUsesRetrievalDefaultAsFloor(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	var seenTopK int
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 12,
+		},
+		MaxTopK: 20,
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			seenTopK = opts.TopK
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello","top_k":5}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if seenTopK != 12 {
+		t.Fatalf("topK = %d, want floor 12", seenTopK)
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	if len(payload.Warnings) != 1 || !strings.Contains(payload.Warnings[0], "floor 12") {
+		t.Fatalf("warnings = %+v, want floor warning", payload.Warnings)
+	}
+}
+
+func TestSearchIndexToolTopKAboveFloorStillHonored(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	var seenTopK int
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 12,
+		},
+		MaxTopK: 20,
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			seenTopK = opts.TopK
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello","top_k":18}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if seenTopK != 18 {
+		t.Fatalf("topK = %d, want agent value above floor", seenTopK)
+	}
+}
+
 func TestSearchIndexToolInvalidArgumentsDoNotConsumeSearchBudget(t *testing.T) {
 	paths := searchToolTestPaths(t, false)
 	tool := NewSearchIndexTool(SearchToolOptions{
@@ -237,6 +299,76 @@ func TestSearchIndexToolDuplicateAcrossSearchesKeepsSourceNumber(t *testing.T) {
 	}
 	if !strings.Contains(second.Content, "[source 1]") {
 		t.Fatalf("second content = %q, want reused source 1", second.Content)
+	}
+}
+
+func TestSearchIndexToolBroadStrategyExpandsFromFirstPassSources(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	registry := NewCitationRegistry()
+	seenQueries := []string{}
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:    paths,
+		Store:    manifest.EmptyStore{},
+		Registry: registry,
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 5,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			seenQueries = append(seenQueries, opts.Question)
+			chunk := testRetrievedChunk("alphafold-outputs", "alphafold/meetings/sdb.md", "AlphaFold outputs include FASTA, A3M, PDB, and error JSON. UniProt appears in metadata.", "indexed")
+			if strings.Contains(opts.Question, "A3M") || strings.Contains(opts.Question, "PDB") {
+				chunk = testRetrievedChunk("alphafold-workflow", "alphafold/meetings/sdb.md", "The folding service has monomer, dimer, and ligand workflow notes.", "indexed")
+			}
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{chunk},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"AlphaFold folding","strategy":"broad"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if len(seenQueries) < 2 {
+		t.Fatalf("seen queries = %+v, want expansion query", seenQueries)
+	}
+	if registry.SourceCount() != 2 {
+		t.Fatalf("source count = %d, want deduped seed plus expansion sources", registry.SourceCount())
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	if payload.Strategy != "broad" || len(payload.ExpansionQueries) == 0 {
+		t.Fatalf("payload = %+v, want broad strategy with expansion queries", payload)
+	}
+	if len(payload.Sources) != 2 {
+		t.Fatalf("sources = %+v, want two fused sources", payload.Sources)
+	}
+	if !strings.Contains(result.Content, "Broad search expansion queries:") {
+		t.Fatalf("content = %q, want broad strategy debug output", result.Content)
+	}
+}
+
+func TestMergeBroadSearchResultsInterleavesExpansionEvidence(t *testing.T) {
+	merged := mergeBroadSearchResults([]rag.RetrieveResult{
+		{
+			Plan: rag.QueryPlan{Mode: "none", Queries: []string{"seed"}},
+			Chunks: []rag.RetrievedChunk{
+				testRetrievedChunk("seed-1", "seed.md", "seed one", "indexed"),
+				testRetrievedChunk("seed-2", "seed.md", "seed two", "indexed"),
+			},
+		},
+		{
+			Plan: rag.QueryPlan{Mode: "none", Queries: []string{"expansion"}},
+			Chunks: []rag.RetrievedChunk{
+				testRetrievedChunk("expansion-1", "expansion.md", "expansion one", "indexed"),
+			},
+		},
+	}, 2)
+	if len(merged.Chunks) != 2 {
+		t.Fatalf("chunks = %+v, want two", merged.Chunks)
+	}
+	if merged.Chunks[0].Chunk.ID != "seed-1" || merged.Chunks[1].Chunk.ID != "expansion-1" {
+		t.Fatalf("chunks = %+v, want interleaved seed and expansion", merged.Chunks)
 	}
 }
 

@@ -185,10 +185,23 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 			Name:      "search_index",
 			Arguments: json.RawMessage(`{"query":" hello ","top_k":8}`),
 		}})
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-1",
+			Name:   "search_index",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"status": "ok",
+				"query": "hello",
+				"top_k": 8,
+				"query_plan": {"queries": ["hello", "hello source"]},
+				"sources": [{"text": "hidden source text"}]
+			}`),
+		}})
 		return agentask.Result{
 			Answer:           "agent answer",
 			ToolCalls:        []string{"search_index"},
 			CitationWarnings: []string{"answer did not cite any source"},
+			CoverageWarnings: []string{"coverage nudge skipped: search call limit reached"},
 		}
 	})
 	defer restore()
@@ -204,11 +217,79 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 	if !strings.Contains(stderr, `agent tool call: search_index {"query":" hello ","top_k":8}`) {
 		t.Fatalf("stderr = %q, want live tool call with arguments", stderr)
 	}
+	if !strings.Contains(stderr, `agent tool result: search_index ok, query="hello", top_k=8, sources=1`) || !strings.Contains(stderr, "agent search query plan:") {
+		t.Fatalf("stderr = %q, want compact tool result", stderr)
+	}
+	if strings.Contains(stderr, "hidden source text") {
+		t.Fatalf("stderr = %q, leaked source text", stderr)
+	}
+	if !strings.Contains(stderr, "agent coverage nudge skipped: search call limit reached") {
+		t.Fatalf("stderr = %q, want coverage warning in debug output", stderr)
+	}
 	if !strings.Contains(stderr, "warning: answer did not cite any source") {
 		t.Fatalf("stderr = %q, want warning", stderr)
 	}
 	if strings.Count(stderr, "agent tool call: search_index") != 1 {
 		t.Fatalf("stderr = %q, want one live tool call line", stderr)
+	}
+}
+
+func TestAskAgentPassesCoverageAndReadSourceFlags(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.CoverageNudge == nil || !*opts.CoverageNudge {
+			t.Fatalf("CoverageNudge = %v, want explicit true", opts.CoverageNudge)
+		}
+		if opts.MinBroadSearchCalls != 3 {
+			t.Fatalf("MinBroadSearchCalls = %d, want 3", opts.MinBroadSearchCalls)
+		}
+		if opts.MaxCoverageRetries != 2 {
+			t.Fatalf("MaxCoverageRetries = %d, want 2", opts.MaxCoverageRetries)
+		}
+		if !opts.EnableReadSourceTool {
+			t.Fatal("EnableReadSourceTool = false, want true")
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-coverage-nudge", "--min-agent-searches", "3", "--max-agent-coverage-retries", "2", "--agent-read-source-tool"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentNoCoverageNudgeFlagDisablesCoverage(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.CoverageNudge == nil || *opts.CoverageNudge {
+			t.Fatalf("CoverageNudge = %v, want explicit false", opts.CoverageNudge)
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--no-agent-coverage-nudge"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentCoverageFlagsConflict(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		t.Fatal("runAgentAsk should not be called when coverage flags conflict")
+		return agentask.Result{}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-coverage-nudge", "--no-agent-coverage-nudge"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
+		t.Fatalf("Execute error = %v, want coverage flag conflict", err)
 	}
 }
 

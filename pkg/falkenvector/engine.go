@@ -316,6 +316,11 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		emitter.emitError(EventRunFailed, err)
 		return Answer{}, err
 	}
+	coverageNudge, err := agentCoverageNudgeOption(request.AgentCoverage)
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return Answer{}, err
+	}
 	result, err := agentask.Run(ctx, agentask.Options{
 		Question:              request.Question,
 		Paths:                 e.paths,
@@ -329,6 +334,9 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		CitationPolicy:        toRAGCitationPolicy(request.CitationPolicy),
 		MaxSearchCalls:        request.MaxAgentSearches,
 		MaxToolTopK:           request.MaxToolTopK,
+		CoverageNudge:         coverageNudge,
+		MinBroadSearchCalls:   request.MinAgentSearches,
+		MaxCoverageRetries:    request.MaxCoverageRetries,
 		EnableReadSourceTool:  request.ReadSourceTool,
 		Events: func(event falken.Event) {
 			converted := convertFalkenEvent(event)
@@ -707,6 +715,21 @@ func toRAGCitationPolicy(policy CitationPolicy) rag.CitationPolicy {
 	}
 }
 
+func agentCoverageNudgeOption(policy AgentCoveragePolicy) (*bool, error) {
+	switch policy {
+	case AgentCoverageDefault:
+		return nil, nil
+	case AgentCoverageOn:
+		value := true
+		return &value, nil
+	case AgentCoverageOff:
+		value := false
+		return &value, nil
+	default:
+		return nil, fmt.Errorf("invalid agent coverage policy %q", policy)
+	}
+}
+
 func publicRetrievedChunks(chunks []rag.RetrievedChunk, config ObservabilityConfig, rawText bool) []RetrievedChunk {
 	out := make([]RetrievedChunk, 0, len(chunks))
 	for i, chunk := range chunks {
@@ -777,6 +800,8 @@ func answerFromAgent(result agentask.Result) Answer {
 		Sources:          publicSources(result.Sources),
 		CitationWarnings: append([]string(nil), result.CitationWarnings...),
 		CitationValid:    result.CitationValid,
+		CoverageWarnings: append([]string(nil), result.CoverageWarnings...),
+		CoverageNudged:   result.CoverageNudged,
 		Retried:          result.Retried,
 		ToolCalls:        calls,
 	}
@@ -801,6 +826,8 @@ func answerEvent(answer Answer, config ObservabilityConfig) *AnswerEvent {
 		SourceCount:      len(answer.Sources),
 		CitationWarnings: append([]string(nil), answer.CitationWarnings...),
 		CitationValid:    answer.CitationValid,
+		CoverageWarnings: append([]string(nil), answer.CoverageWarnings...),
+		CoverageNudged:   answer.CoverageNudged,
 		Retried:          answer.Retried,
 		ToolCalls:        append([]ToolCallSummary(nil), answer.ToolCalls...),
 	}

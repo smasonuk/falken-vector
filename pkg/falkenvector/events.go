@@ -151,6 +151,8 @@ type AnswerEvent struct {
 	SourceCount      int               `json:"source_count,omitempty"`
 	CitationWarnings []string          `json:"citation_warnings,omitempty"`
 	CitationValid    bool              `json:"citation_valid,omitempty"`
+	CoverageWarnings []string          `json:"coverage_warnings,omitempty"`
+	CoverageNudged   bool              `json:"coverage_nudged,omitempty"`
 	Retried          bool              `json:"retried,omitempty"`
 	ToolCalls        []ToolCallSummary `json:"tool_calls,omitempty"`
 }

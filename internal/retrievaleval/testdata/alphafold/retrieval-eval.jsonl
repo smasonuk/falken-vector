@@ -1,0 +1,2 @@
+{"id":"alphafold-broad-summary","question":"summarize information on alphafold or anything related to folding","expected_path_suffixes":["alphafold/meetings/storage-outputs.md","alphafold/meetings/service-workflow.md","alphafold/meetings/metadata-gaps.md"],"notes":"Broad coverage should include storage/output artifacts plus service workflow and metadata context."}
+

@@ -87,6 +87,24 @@ func TestEngineConfigFromEnvFallsBackToEmbeddingKeyForChat(t *testing.T) {
 	}
 }
 
+func TestAgentCoverageNudgeOption(t *testing.T) {
+	defaultValue, err := agentCoverageNudgeOption(AgentCoverageDefault)
+	if err != nil || defaultValue != nil {
+		t.Fatalf("default = %v, %v; want nil without error", defaultValue, err)
+	}
+	on, err := agentCoverageNudgeOption(AgentCoverageOn)
+	if err != nil || on == nil || !*on {
+		t.Fatalf("on = %v, %v; want true", on, err)
+	}
+	off, err := agentCoverageNudgeOption(AgentCoverageOff)
+	if err != nil || off == nil || *off {
+		t.Fatalf("off = %v, %v; want false", off, err)
+	}
+	if _, err := agentCoverageNudgeOption(AgentCoveragePolicy("bogus")); err == nil {
+		t.Fatal("invalid policy succeeded, want error")
+	}
+}
+
 func TestEngineConfigFromEnvERejectsInvalidHeaders(t *testing.T) {
 	_, err := EngineConfigFromEnvE(func(key string) string {
 		if key == "FALKENGO_LLM_HEADERS" {

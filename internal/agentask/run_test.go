@@ -41,8 +41,220 @@ func TestRunCompletesToolCallingAgentWithCitations(t *testing.T) {
 	if len(result.ToolCalls) != 1 || result.ToolCalls[0] != SearchIndexToolName {
 		t.Fatalf("tool calls = %+v, want search_index", result.ToolCalls)
 	}
+	if len(result.Trace.ToolCalls) != 1 || result.Trace.ToolCalls[0].Name != SearchIndexToolName || string(result.Trace.ToolCalls[0].Arguments) != `{"query":"citation validation"}` {
+		t.Fatalf("trace tool calls = %+v, want structured search_index arguments", result.Trace.ToolCalls)
+	}
+	if len(result.Trace.ToolResults) != 1 || result.Trace.ToolResults[0].Name != SearchIndexToolName || !result.Trace.ToolResults[0].Success || result.Trace.ToolResults[0].Status != "ok" {
+		t.Fatalf("trace tool results = %+v, want successful search_index result", result.Trace.ToolResults)
+	}
 	if len(llm.requests) == 0 || !requestHasTool(llm.requests[0], SearchIndexToolName) {
 		t.Fatalf("first request tools = %+v, want search_index", llm.requests[0].Tools)
+	}
+}
+
+func TestRunCoverageNudgesBroadValidAnswerAfterOneSearch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search-1",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold folding"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold outputs include PDB files [source 1].", FinishReason: falken.FinishReasonStop},
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search-2",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold A3M PDB error JSON"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search-3",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"folding monomer dimer ligand"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold outputs include PDB files [source 1] and A3M inputs [source 2].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize information on alphafold or anything related to folding"
+	opts.RetrieveWithPlan = alphafoldRetrieveWithPlan
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Retried {
+		t.Fatal("Retried = false, want coverage retry")
+	}
+	if !result.CoverageNudged {
+		t.Fatal("CoverageNudged = false, want coverage nudge status")
+	}
+	if len(result.CoverageWarnings) == 0 || !strings.Contains(result.CoverageWarnings[0], "coverage nudge") {
+		t.Fatalf("CoverageWarnings = %+v, want coverage nudge warning", result.CoverageWarnings)
+	}
+	if result.Answer != "AlphaFold outputs include PDB files [source 1] and A3M inputs [source 2]." {
+		t.Fatalf("answer = %q, want post-nudge answer", result.Answer)
+	}
+	if !result.CitationValid {
+		t.Fatalf("CitationValid = false, warnings = %+v", result.CitationWarnings)
+	}
+	if len(result.ToolCalls) != 3 {
+		t.Fatalf("tool calls = %+v, want three search calls", result.ToolCalls)
+	}
+	if len(result.Trace.ToolCalls) != 3 || string(result.Trace.ToolCalls[1].Arguments) != `{"query":"AlphaFold A3M PDB error JSON"}` {
+		t.Fatalf("trace tool calls = %+v, want coverage follow-up query", result.Trace.ToolCalls)
+	}
+	if len(llm.requests) < 3 {
+		t.Fatalf("requests = %+v, want coverage retry request", llm.requests)
+	}
+	prompt := lastUserPrompt(llm.requests[2])
+	if !strings.Contains(prompt, "additional search_index") || !strings.Contains(prompt, "materially different queries") || !strings.Contains(prompt, opts.Question) || !strings.Contains(prompt, "AlphaFold outputs include PDB files [source 1].") {
+		t.Fatalf("coverage prompt = %q, want coverage nudge wording", prompt)
+	}
+}
+
+func TestRunDoesNotCoverageNudgeNarrowValidAnswer(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"citation validation"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "Citation validation is implemented here [source 1].", FinishReason: falken.FinishReasonStop},
+	}}
+	result, err := Run(context.Background(), testRunOptions(t, llm))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Retried {
+		t.Fatalf("Retried = true, want no coverage retry for narrow question")
+	}
+	if len(llm.requests) != 2 {
+		t.Fatalf("request count = %d, want no retry request", len(llm.requests))
+	}
+}
+
+func TestRunCoverageNudgeRespectsSearchBudget(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold folding"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold outputs include PDB files [source 1].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize information on alphafold or anything related to folding"
+	opts.MaxSearchCalls = 1
+	opts.RetrieveWithPlan = alphafoldRetrieveWithPlan
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Retried {
+		t.Fatal("Retried = true, want search budget to prevent coverage retry")
+	}
+	if result.CoverageNudged {
+		t.Fatal("CoverageNudged = true, want skipped coverage nudge")
+	}
+	if len(result.CoverageWarnings) != 1 || !strings.Contains(result.CoverageWarnings[0], "search call limit reached") {
+		t.Fatalf("CoverageWarnings = %+v, want search budget warning", result.CoverageWarnings)
+	}
+	if len(llm.requests) != 2 {
+		t.Fatalf("request count = %d, want no retry request", len(llm.requests))
+	}
+}
+
+func TestRunCoverageNudgeCanBeDisabled(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold folding"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold outputs include PDB files [source 1].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize information on alphafold or anything related to folding"
+	opts.CoverageNudge = boolPtr(false)
+	opts.RetrieveWithPlan = alphafoldRetrieveWithPlan
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Retried {
+		t.Fatal("Retried = true, want disabled coverage nudge")
+	}
+	if len(llm.requests) != 2 {
+		t.Fatalf("request count = %d, want no retry request", len(llm.requests))
+	}
+}
+
+func TestRunCoverageNudgeUsesExplicitMinimumSearchCount(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search-1",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold folding"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold outputs include PDB files [source 1].", FinishReason: falken.FinishReasonStop},
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search-2",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold A3M PDB error JSON"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search-3",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"folding monomer dimer ligand"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold outputs include PDB files [source 1] and service notes [source 3].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize information on alphafold or anything related to folding"
+	opts.MinBroadSearchCalls = 3
+	opts.RetrieveWithPlan = alphafoldRetrieveWithPlan
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Retried || !result.CitationValid {
+		t.Fatalf("result = %+v, want valid coverage retry", result)
+	}
+	if len(llm.requests) < 3 || !strings.Contains(lastUserPrompt(llm.requests[2]), "at least 2 additional search_index call(s)") {
+		t.Fatalf("coverage prompt = %q, want explicit remaining search count", lastUserPrompt(llm.requests[2]))
 	}
 }
 
@@ -383,4 +595,24 @@ func lastUserPrompt(request falken.CompletionRequest) string {
 		}
 	}
 	return ""
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func alphafoldRetrieveWithPlan(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+	chunk := testRetrievedChunk("alphafold-outputs", "alphafold/meetings/sdb.md", "AlphaFold outputs include PDB files.", "Document: hidden")
+	switch {
+	case strings.Contains(opts.Question, "A3M"):
+		chunk = testRetrievedChunk("alphafold-a3m", "alphafold/meetings/sdb.md", "AlphaFold jobs use A3M inputs and can produce error JSON.", "Document: hidden")
+	case strings.Contains(opts.Question, "monomer"):
+		chunk = testRetrievedChunk("alphafold-service", "alphafold/meetings/sdb.md", "The folding workflow mentions monomer, dimer, and ligand service notes.", "Document: hidden")
+	}
+	return rag.RetrieveResult{
+		Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+		Chunks: []rag.RetrievedChunk{
+			chunk,
+		},
+	}, nil
 }

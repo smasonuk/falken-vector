@@ -54,6 +54,9 @@ func NewReadIndexSourceTool(opts ReadSourceToolOptions) falken.Tool {
 			return failedReadSourceToolResult("read_source_failed", fmt.Sprintf("read source %q: %v", source.Path, err)), nil
 		}
 		text, startLine, endLine := sourceContextText(string(data), source.StartLine, source.EndLine, contextLines)
+		if err := opts.Registry.ExpandSource(source.SourceNumber, startLine, endLine, text); err != nil {
+			return failedReadSourceToolResult("expand_source_failed", err.Error()), nil
+		}
 		payload := readSourcePayload{
 			Success:      true,
 			Status:       "ok",

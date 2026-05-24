@@ -16,7 +16,26 @@ var (
 	usefulPhrasePattern = regexp.MustCompile(`(?i)\b(error\s+JSON|structure\s+DB|shared\s+completed|shared\s+in[- ]progress|monomer|dimer|ligand|metadata|protein|proteins|workflow|pipeline)\b`)
 )
 
+type SuggestionPurpose int
+
+const (
+	SuggestionPurposeBroadExpansion SuggestionPurpose = iota
+	SuggestionPurposeAgentHint
+)
+
 func SuggestFollowupQueries(question string, sources []rag.SourceChunk, limit int) []string {
+	return SuggestBroadExpansionQueries(question, sources, limit)
+}
+
+func SuggestBroadExpansionQueries(question string, sources []rag.SourceChunk, limit int) []string {
+	return suggestFollowupQueries(question, sources, limit, SuggestionPurposeBroadExpansion)
+}
+
+func SuggestAgentFollowupHints(question string, sources []rag.SourceChunk, limit int) []string {
+	return suggestFollowupQueries(question, sources, limit, SuggestionPurposeAgentHint)
+}
+
+func suggestFollowupQueries(question string, sources []rag.SourceChunk, limit int, purpose SuggestionPurpose) []string {
 	if limit <= 0 {
 		return nil
 	}
@@ -31,6 +50,16 @@ func SuggestFollowupQueries(question string, sources []rag.SourceChunk, limit in
 		query := normalizeSearchQuery(joinUnique(append([]string{topic}, group...)))
 		if query == "" || !materiallyDifferentQuery(query, question) {
 			continue
+		}
+		switch purpose {
+		case SuggestionPurposeBroadExpansion:
+			if !usefulExpansionGroup(group) || !usefulExpansionQuery(query, question) {
+				continue
+			}
+		case SuggestionPurposeAgentHint:
+			if !usefulHintGroup(group) || !usefulHintQuery(query, question) {
+				continue
+			}
 		}
 		queries = append(queries, query)
 		if len(queries) >= limit {
@@ -114,7 +143,7 @@ func rankedSuggestionBuckets(question string, sources []rag.SourceChunk, limit i
 
 func groupTermsForQueries(b suggestionBuckets) [][]string {
 	groups := make([][]string, 0, 6)
-	if group := preferredTerms([]string{"A3M", "PDB", "error JSON", "JSON", "FASTA"}, b.allCaps, b.usefulPhrases); len(group) != 0 {
+	if group := preferredTerms([]string{"A3M", "PDB", "error JSON", "JSON", "FASTA", "NCBI"}, b.allCaps, b.usefulPhrases); len(group) != 0 {
 		groups = append(groups, group)
 	}
 	if group := preferredTerms([]string{"UniProt", "metadata", "protein", "proteins"}, b.camel, b.usefulPhrases, b.ordinary); len(group) != 0 {
@@ -221,6 +250,124 @@ func materiallyDifferentQuery(query, question string) bool {
 	return !strings.EqualFold(normalizeSearchQuery(query), normalizeSearchQuery(question))
 }
 
+func usefulExpansionGroup(group []string) bool {
+	joined := strings.Join(group, " ")
+	return len(group) != 0 &&
+		!containsTranscriptFragment(joined) &&
+		highSignalTermCount(joined) > 0
+}
+
+func usefulExpansionQuery(query string, originalQuestion string) bool {
+	query = normalizeSearchQuery(query)
+	if query == "" || !materiallyDifferentQuery(query, originalQuestion) {
+		return false
+	}
+	if len(query) > 100 {
+		return false
+	}
+	tokens := normalizedQueryTokens(query)
+	if len(tokens) == 0 || len(tokens) > 10 {
+		return false
+	}
+	if containsTranscriptFragment(query) {
+		return false
+	}
+	signals := highSignalTermCount(query)
+	if signals == 0 {
+		return false
+	}
+	if signals < 2 && mostlySpeechTokens(tokens) {
+		return false
+	}
+	return true
+}
+
+func usefulHintGroup(group []string) bool {
+	return len(group) != 0 && !containsTranscriptFragment(strings.Join(group, " "))
+}
+
+func usefulHintQuery(query string, originalQuestion string) bool {
+	query = normalizeSearchQuery(query)
+	if query == "" || !materiallyDifferentQuery(query, originalQuestion) {
+		return false
+	}
+	if len(query) > 120 {
+		return false
+	}
+	tokens := normalizedQueryTokens(query)
+	if len(tokens) == 0 || len(tokens) > 12 {
+		return false
+	}
+	if containsTranscriptFragment(query) {
+		return false
+	}
+	if highSignalTermCount(query) == 0 && mostlySpeechTokens(tokens) {
+		return false
+	}
+	return true
+}
+
+func normalizedQueryTokens(query string) []string {
+	words := strings.Fields(normalizeSearchQuery(query))
+	out := make([]string, 0, len(words))
+	for _, word := range words {
+		word = strings.ToLower(strings.Trim(word, " \t\r\n.,:;()[]{}"))
+		if word == "" {
+			continue
+		}
+		out = append(out, word)
+	}
+	return out
+}
+
+func containsTranscriptFragment(value string) bool {
+	normalized := " " + strings.ToLower(strings.Join(strings.Fields(value), " ")) + " "
+	for _, fragment := range transcriptNoiseFragments {
+		if strings.Contains(normalized, " "+fragment+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func highSignalTermCount(value string) int {
+	normalized := strings.ToLower(strings.Join(strings.Fields(value), " "))
+	count := 0
+	for _, phrase := range highSignalExpansionPhrases {
+		if strings.Contains(normalized, phrase) {
+			count++
+		}
+	}
+	for _, token := range normalizedQueryTokens(value) {
+		if _, ok := highSignalExpansionTokens[token]; ok {
+			count++
+		}
+	}
+	for _, token := range allCapsTokenPattern.FindAllString(value, -1) {
+		if len(token) >= 3 {
+			count++
+		}
+	}
+	return count
+}
+
+func mostlySpeechTokens(tokens []string) bool {
+	if len(tokens) == 0 {
+		return true
+	}
+	speech := 0
+	for _, token := range tokens {
+		if len(token) <= 2 {
+			speech++
+			continue
+		}
+		if _, ok := expansionSpeechStopWords[token]; ok {
+			speech++
+		}
+	}
+	return speech*2 >= len(tokens)
+}
+
 func usefulSuggestionTerm(term, question string) bool {
 	if len(term) < 3 {
 		return false
@@ -287,4 +434,71 @@ var topicStopWords = map[string]struct{}{
 	"summarize":   {},
 	"summarise":   {},
 	"summary":     {},
+}
+
+var highSignalExpansionPhrases = []string{
+	"error json",
+	"structure db",
+	"shared completed",
+	"shared in progress",
+}
+
+var highSignalExpansionTokens = map[string]struct{}{
+	"a3m":       {},
+	"alphafold": {},
+	"dimer":     {},
+	"fasta":     {},
+	"json":      {},
+	"ligand":    {},
+	"metadata":  {},
+	"monomer":   {},
+	"ncbi":      {},
+	"pdb":       {},
+	"pipeline":  {},
+	"protein":   {},
+	"proteins":  {},
+	"uniprot":   {},
+	"workflow":  {},
+}
+
+var transcriptNoiseFragments = []string{
+	"for example",
+	"going to",
+	"these two",
+	"probably about",
+	"which are",
+	"which is",
+	"kind of",
+	"sort of",
+	"you know",
+	"i think",
+}
+
+var expansionSpeechStopWords = map[string]struct{}{
+	"about":    {},
+	"again":    {},
+	"also":     {},
+	"and":      {},
+	"are":      {},
+	"because":  {},
+	"been":     {},
+	"being":    {},
+	"don":      {},
+	"example":  {},
+	"for":      {},
+	"from":     {},
+	"going":    {},
+	"here":     {},
+	"into":     {},
+	"probably": {},
+	"really":   {},
+	"several":  {},
+	"that":     {},
+	"these":    {},
+	"this":     {},
+	"those":    {},
+	"two":      {},
+	"which":    {},
+	"with":     {},
+	"would":    {},
 }

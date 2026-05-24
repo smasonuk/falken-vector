@@ -397,6 +397,114 @@ func TestSearchIndexToolBroadStrategyExpandsFromFirstPassSources(t *testing.T) {
 	}
 }
 
+func TestSearchIndexToolMaxExpansionQueriesDisablesBroadExpansion(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	retrievalCalls := 0
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:               paths,
+		Store:               manifest.EmptyStore{},
+		MaxExpansionQueries: -1,
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 5,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			retrievalCalls++
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{testRetrievedChunk("alphafold-outputs", "alphafold/meetings/sdb.md", "AlphaFold outputs include A3M, PDB, error JSON, UniProt, monomer, dimer, and ligand.", "indexed")},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"AlphaFold","strategy":"broad"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	if retrievalCalls != 1 || payload.RetrievalCalls != 1 {
+		t.Fatalf("retrieval calls = %d payload=%d, want seed search only", retrievalCalls, payload.RetrievalCalls)
+	}
+	if len(payload.ExpansionQueries) != 0 {
+		t.Fatalf("expansion queries = %+v, want disabled expansion", payload.ExpansionQueries)
+	}
+}
+
+func TestSearchIndexToolStopsBroadExpansionAtRetrievalBudget(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	retrievalCalls := 0
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:               paths,
+		Store:               manifest.EmptyStore{},
+		MaxExpansionQueries: 2,
+		MaxRetrievalCalls:   2,
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 5,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			retrievalCalls++
+			return rag.RetrieveResult{
+				Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{
+					testRetrievedChunk("alphafold-outputs", "alphafold/meetings/sdb.md", "AlphaFold outputs include A3M, PDB, error JSON, UniProt, monomer, dimer, and ligand.", "indexed"),
+				},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"AlphaFold","strategy":"broad"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	if retrievalCalls != 2 || payload.RetrievalCalls != 2 {
+		t.Fatalf("retrieval calls = %d payload=%d, want seed plus one expansion", retrievalCalls, payload.RetrievalCalls)
+	}
+	if len(payload.ExpansionQueries) != 1 {
+		t.Fatalf("expansion queries = %+v, want one executed expansion", payload.ExpansionQueries)
+	}
+	if len(payload.Warnings) != 1 || !strings.Contains(payload.Warnings[0], "max retrieval calls") {
+		t.Fatalf("warnings = %+v, want retrieval budget warning", payload.Warnings)
+	}
+}
+
+func TestSearchIndexToolBroadStrategyRejectsTranscriptFragmentsFromAlphaFoldTrace(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:               paths,
+		Store:               manifest.EmptyStore{},
+		MaxExpansionQueries: 3,
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 5,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			chunk := testRetrievedChunk("alphafold-noisy", "alphafold/meetings/sdb.md", `So these two folders here which are shared completed and in progress.
+For example amaranthus is species. Outputs include FASTA, A3M, PDB, error JSON and NCBI tax IDs.
+UniProt metadata tracks monomer, dimer, and ligand workflow notes.`, "indexed")
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{chunk},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"AlphaFold","strategy":"broad"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	got := strings.ToLower(strings.Join(payload.ExpansionQueries, "\n"))
+	for _, bad := range []string{"these two folders here", "for example", "amaranthus", "species"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("expansion queries = %+v, leaked transcript fragment %q", payload.ExpansionQueries, bad)
+		}
+	}
+	for _, want := range []string{"a3m", "pdb", "json", "ncbi"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expansion queries = %+v, want %q", payload.ExpansionQueries, want)
+		}
+	}
+}
+
 func TestSearchIndexToolDefaultsBroadStrategyForBroadUserQuestion(t *testing.T) {
 	paths := searchToolTestPaths(t, false)
 	seenQueries := []string{}

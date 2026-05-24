@@ -3,6 +3,8 @@ package agentask
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -537,6 +539,111 @@ func TestRunExposesReadSourceToolWhenEnabled(t *testing.T) {
 	}
 	if !strings.Contains(llm.requests[0].Messages[0].Content, "read_index_source") {
 		t.Fatalf("system prompt = %q, want read_index_source instructions", llm.requests[0].Messages[0].Content)
+	}
+}
+
+func TestRunThinSourceNudgeExpandsShortCitedSource(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	sourcePath := filepath.Join(t.TempDir(), "alphafold.md")
+	if err := os.WriteFile(sourcePath, []byte("one\ntwo\nAlphaFold thin line\nfour\nfive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold","strategy":"focused"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold is mentioned in the notes [source 1].", FinishReason: falken.FinishReasonStop},
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-read",
+				Name:      ReadIndexSourceToolName,
+				Arguments: json.RawMessage(`{"source_number":1,"context_lines":20}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold is mentioned in the surrounding notes [source 1].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize anything related to AlphaFold folding"
+	opts.EnableReadSourceTool = true
+	opts.CoverageNudge = boolPtr(false)
+	opts.RetrieveWithPlan = func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+		chunk := testRetrievedChunk("alphafold-thin", sourcePath, "AlphaFold thin line", "indexed")
+		chunk.Chunk.StartLine = 3
+		chunk.Chunk.EndLine = 3
+		return rag.RetrieveResult{
+			Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+			Chunks: []rag.RetrievedChunk{chunk},
+		}, nil
+	}
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.ThinSourceNudged || !result.Retried {
+		t.Fatalf("result = %+v, want thin-source retry", result)
+	}
+	if !result.CitationValid {
+		t.Fatalf("CitationValid = false warnings=%+v", result.CitationWarnings)
+	}
+	if !hasToolCall(result.ToolCalls, ReadIndexSourceToolName) {
+		t.Fatalf("tool calls = %+v, want read_index_source", result.ToolCalls)
+	}
+	if len(result.Sources) != 1 || result.Sources[0].StartLine != 1 || result.Sources[0].EndLine != 5 {
+		t.Fatalf("sources = %+v, want expanded source range", result.Sources)
+	}
+	if len(result.ThinSourceWarnings) == 0 || !strings.Contains(result.ThinSourceWarnings[0], "thin-source nudge: expanding [source 1]") {
+		t.Fatalf("thin warnings = %+v, want nudge status", result.ThinSourceWarnings)
+	}
+	if len(llm.requests) < 3 || !strings.Contains(lastUserPrompt(llm.requests[2]), "very short source spans") {
+		t.Fatalf("thin nudge prompt missing in requests = %+v", llm.requests)
+	}
+}
+
+func TestRunThinSourceNudgeSkippedWhenReadSourceDisabled(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold","strategy":"focused"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold is mentioned in the notes [source 1].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize anything related to AlphaFold folding"
+	opts.CoverageNudge = boolPtr(false)
+	opts.RetrieveWithPlan = func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+		chunk := testRetrievedChunk("alphafold-thin", "alphafold.md", "AlphaFold thin line", "indexed")
+		chunk.Chunk.StartLine = 3
+		chunk.Chunk.EndLine = 3
+		return rag.RetrieveResult{
+			Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+			Chunks: []rag.RetrievedChunk{chunk},
+		}, nil
+	}
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ThinSourceNudged || result.Retried {
+		t.Fatalf("result = %+v, want no thin-source retry", result)
+	}
+	if len(result.ThinSourceWarnings) != 1 || !strings.Contains(result.ThinSourceWarnings[0], "read_index_source disabled") {
+		t.Fatalf("thin warnings = %+v, want disabled skip status", result.ThinSourceWarnings)
+	}
+	if len(llm.requests) != 2 {
+		t.Fatalf("requests = %d, want only initial search run", len(llm.requests))
 	}
 }
 

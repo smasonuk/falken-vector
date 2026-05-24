@@ -33,6 +33,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		opts.MaxToolTopK = 20
 	}
 	coveragePolicy := normalizeCoveragePolicy(opts)
+	thinPolicy := normalizeThinSourcePolicy(opts)
 
 	registry := NewCitationRegistry()
 	searchTool := NewSearchIndexTool(SearchToolOptions{
@@ -48,6 +49,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		MaxSearchCalls:        opts.MaxSearchCalls,
 		MaxTopK:               opts.MaxToolTopK,
 		MaxExpansionQueries:   opts.MaxBroadExpansionQueries,
+		MaxRetrievalCalls:     opts.MaxRetrievalCalls,
 	})
 	agentTools := []falken.Tool{searchTool}
 	if opts.EnableReadSourceTool {
@@ -125,26 +127,60 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	if validation.Valid {
 		coverageRetries := 0
+		coverageComplete := false
+		thinRetries := 0
 		for {
-			stats := searchStats(trace)
-			decision := coverageNudgeDecision(opts.Question, coveragePolicy, stats.SearchCalls, stats.SuccessfulSearchCalls, len(result.Sources), opts.MaxSearchCalls, coverageRetries)
-			if !decision.Nudge {
+			if !coverageComplete {
+				stats := searchStats(trace)
+				decision := coverageNudgeDecision(opts.Question, coveragePolicy, stats.SearchCalls, stats.SuccessfulSearchCalls, len(result.Sources), opts.MaxSearchCalls, coverageRetries)
+				if decision.Nudge {
+					result.CoverageWarnings = append(result.CoverageWarnings, coverageNudgeWarning(stats.SuccessfulSearchCalls, decision.RemainingNeeded))
+					retryAnswer, err := agent.Run(ctx, coverageNudgePrompt(opts.Question, answer, stats.SuccessfulSearchCalls, decision.RemainingNeeded))
+					if err != nil {
+						result.CitationWarnings = append(result.CitationWarnings, "coverage nudge failed: "+err.Error())
+						result.CitationValid = true
+						return result, nil
+					}
+					coverageRetries++
+					result.Retried = true
+					result.CoverageNudged = true
+					result.Answer = retryAnswer
+					result.Sources = registry.Sources()
+					result.ToolCalls = append([]string(nil), capturedToolCalls...)
+					result.Trace = cloneAgentTrace(trace)
+					validation = registry.Validate(result.Answer)
+					if !validation.Valid || unsupportedZeroSourceAnswer(validation, result.Sources, result.ToolCalls, result.Answer) {
+						return validateRetryResult(&result, registry)
+					}
+					answer = result.Answer
+					continue
+				}
 				if warning := coverageSkippedWarning(decision.Reason); warning != "" {
 					result.CoverageWarnings = append(result.CoverageWarnings, warning)
+				}
+				coverageComplete = true
+			}
+
+			thinDecision := thinSourceNudgeDecision(opts.Question, opts.EnableReadSourceTool, thinPolicy, result.Answer, result.Sources, trace, thinRetries)
+			if !thinDecision.Nudge {
+				if thinRetries == 0 {
+					if warning := thinSourceSkippedWarning(thinDecision.Reason); warning != "" {
+						result.ThinSourceWarnings = append(result.ThinSourceWarnings, warning)
+					}
 				}
 				result.CitationValid = true
 				return result, nil
 			}
-			result.CoverageWarnings = append(result.CoverageWarnings, coverageNudgeWarning(stats.SuccessfulSearchCalls, decision.RemainingNeeded))
-			retryAnswer, err := agent.Run(ctx, coverageNudgePrompt(opts.Question, answer, stats.SuccessfulSearchCalls, decision.RemainingNeeded))
+			result.ThinSourceWarnings = append(result.ThinSourceWarnings, thinSourceNudgeWarning(thinDecision.SourceNumbers))
+			retryAnswer, err := agent.Run(ctx, thinSourceNudgePrompt(thinDecision.SourceNumbers, thinDecision.ContextLines))
 			if err != nil {
-				result.CitationWarnings = append(result.CitationWarnings, "coverage nudge failed: "+err.Error())
+				result.ThinSourceWarnings = append(result.ThinSourceWarnings, "thin-source nudge failed: "+err.Error())
 				result.CitationValid = true
 				return result, nil
 			}
-			coverageRetries++
+			thinRetries++
 			result.Retried = true
-			result.CoverageNudged = true
+			result.ThinSourceNudged = true
 			result.Answer = retryAnswer
 			result.Sources = registry.Sources()
 			result.ToolCalls = append([]string(nil), capturedToolCalls...)

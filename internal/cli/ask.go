@@ -31,6 +31,7 @@ func newAskCommand(opts *options) *cobra.Command {
 	var noCitationRetry bool
 	var agentMode bool
 	var showAgentTools bool
+	var showSourceProvenance bool
 	var sourcesMode string
 	var agentCoverageNudge bool
 	var noAgentCoverageNudge bool
@@ -39,6 +40,8 @@ func newAskCommand(opts *options) *cobra.Command {
 	var agentReadSourceTool bool
 	var noAgentReadSourceTool bool
 	var maxAgentSearches int
+	var maxAgentExpansionQueries int
+	var maxAgentRetrievals int
 	var retrievalFlags retrievalFlagValues
 	var sourceFlags sourceFilterFlagValues
 	cmd := &cobra.Command{
@@ -89,6 +92,13 @@ func newAskCommand(opts *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
+				maxBroadExpansionQueries, err := maxBroadExpansionQueriesFromFlag(maxAgentExpansionQueries)
+				if err != nil {
+					return err
+				}
+				if maxAgentRetrievals < 0 {
+					return errors.New("--max-agent-retrievals must be >= 0")
+				}
 				effectiveReadSourceTool, err := agentReadSourceToolFromFlags(agentReadSourceTool, noAgentReadSourceTool, cmd.Flags().Changed("agent-read-source-tool"), args[0])
 				if err != nil {
 					return err
@@ -100,21 +110,23 @@ func newAskCommand(opts *options) *cobra.Command {
 					return fmt.Errorf("configure agent LLM: %w", err)
 				}
 				agentOptions := agentask.Options{
-					Question:              args[0],
-					Paths:                 paths,
-					Store:                 store,
-					RetrievalDefaults:     retrievalOpts,
-					AgentLLM:              agentLLM,
-					EmbedderFactory:       newCLIEmbedder,
-					RetrieveWithPlan:      retrieveWithPlan,
-					PrepareLexicalIndex:   prepareLexicalIndex,
-					ConfigureQueryPlanner: configureQueryPlanner,
-					CitationPolicy:        citationPolicy,
-					MaxSearchCalls:        maxAgentSearches,
-					CoverageNudge:         coverageNudge,
-					MinBroadSearchCalls:   minAgentSearches,
-					MaxCoverageRetries:    maxAgentCoverageRetries,
-					EnableReadSourceTool:  effectiveReadSourceTool,
+					Question:                 args[0],
+					Paths:                    paths,
+					Store:                    store,
+					RetrievalDefaults:        retrievalOpts,
+					AgentLLM:                 agentLLM,
+					EmbedderFactory:          newCLIEmbedder,
+					RetrieveWithPlan:         retrieveWithPlan,
+					PrepareLexicalIndex:      prepareLexicalIndex,
+					ConfigureQueryPlanner:    configureQueryPlanner,
+					CitationPolicy:           citationPolicy,
+					MaxSearchCalls:           maxAgentSearches,
+					MaxBroadExpansionQueries: maxBroadExpansionQueries,
+					MaxRetrievalCalls:        maxAgentRetrievals,
+					CoverageNudge:            coverageNudge,
+					MinBroadSearchCalls:      minAgentSearches,
+					MaxCoverageRetries:       maxAgentCoverageRetries,
+					EnableReadSourceTool:     effectiveReadSourceTool,
 				}
 				if showAgentTools {
 					toolPrinter := newAgentToolPrinter()
@@ -133,9 +145,10 @@ func newAskCommand(opts *options) *cobra.Command {
 				}
 				if showAgentTools {
 					printCoverageWarnings(cmd.ErrOrStderr(), result.CoverageWarnings)
+					printThinSourceWarnings(cmd.ErrOrStderr(), result.ThinSourceWarnings)
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
-				printAnswerWithSourceMode(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode)
+				printAnswerWithSourceMode(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode, showSourceProvenance)
 				return nil
 			}
 			if err := prepareLexicalIndex(ctx, store, retrievalOpts.Mode); err != nil {
@@ -202,10 +215,13 @@ func newAskCommand(opts *options) *cobra.Command {
 	cmd.Flags().IntVar(&openSource, "open-source", 0, "open retrieved source number in configured editor")
 	cmd.Flags().BoolVar(&noCitationValidation, "no-citation-validation", false, "disable answer citation validation")
 	cmd.Flags().BoolVar(&noCitationRetry, "no-citation-retry", false, "disable stricter citation retry")
-	cmd.Flags().StringVar(&sourcesMode, "sources", "cited", "sources to print with answers: cited, all, or both")
+	cmd.Flags().StringVar(&sourcesMode, "sources", "cited", "sources to print with answers: cited (cited only), all (all available, marking cited), or both (cited plus other available)")
 	cmd.Flags().BoolVar(&agentMode, "agent", false, "use a Falken agent with a search_index tool instead of pre-attaching retrieved chunks")
 	cmd.Flags().BoolVar(&showAgentTools, "show-agent-tools", false, "print agent tool calls and compact tool results to stderr")
+	cmd.Flags().BoolVar(&showSourceProvenance, "show-source-provenance", false, "print first search provenance for agent source lists")
 	cmd.Flags().IntVar(&maxAgentSearches, "max-agent-searches", 6, "maximum number of search_index calls allowed during one agent ask run")
+	cmd.Flags().IntVar(&maxAgentExpansionQueries, "max-agent-expansion-queries", 2, "maximum internal broad expansion queries per search_index call; 0 disables expansion")
+	cmd.Flags().IntVar(&maxAgentRetrievals, "max-agent-retrievals", 0, "maximum actual retrieval calls across agent search_index calls; 0 leaves uncapped")
 	cmd.Flags().BoolVar(&agentCoverageNudge, "agent-coverage-nudge", false, "enable broad-question coverage nudging in agent mode")
 	cmd.Flags().BoolVar(&noAgentCoverageNudge, "no-agent-coverage-nudge", false, "disable broad-question coverage nudging in agent mode")
 	cmd.Flags().IntVar(&minAgentSearches, "min-agent-searches", 0, "minimum successful search_index calls for broad agent questions")
@@ -222,15 +238,15 @@ func printAnswer(w io.Writer, result rag.AskResult) {
 }
 
 func printAnswerWithSourcesMode(w io.Writer, result rag.AskResult, sourcesMode string) {
-	printAnswerWithSourceMode(w, result.Answer, result.Sources, sourcesMode)
+	printAnswerWithSourceMode(w, result.Answer, result.Sources, sourcesMode, false)
 }
 
-func printAnswerWithSourceMode(w io.Writer, answer string, sources []rag.SourceChunk, sourcesMode string) {
+func printAnswerWithSourceMode(w io.Writer, answer string, sources []rag.SourceChunk, sourcesMode string, showProvenance bool) {
 	fmt.Fprintln(w, "Answer:")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, answer)
 	fmt.Fprintln(w)
-	printSourcesForMode(w, answer, sources, sourcesMode)
+	printSourcesForMode(w, answer, sources, sourcesMode, showProvenance)
 }
 
 func printAnswerText(w io.Writer, answer string, sources []rag.SourceChunk) {
@@ -247,12 +263,12 @@ func printCitationWarnings(w io.Writer, warnings []string) {
 	}
 }
 
-func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, mode string) {
+func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, mode string, showProvenance bool) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "cited":
 		printSourcesWithHeading(w, "Sources:", citedSourcesOnly(answer, sources))
 	case "all":
-		printAllSourcesWithCitationMarkers(w, answer, sources)
+		printAllSourcesWithCitationMarkers(w, answer, sources, showProvenance)
 		printSourceAudit(w, answer, sources)
 	case "both":
 		cited := citedSourcesOnly(answer, sources)
@@ -261,7 +277,7 @@ func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, 
 		} else if len(sources) != 0 {
 			fmt.Fprintln(w, "No cited sources.")
 		}
-		printAllSourcesWithCitationMarkers(w, answer, sources)
+		printSourcesWithHeadingAndProvenance(w, "Other sources available to the agent:", uncitedSourcesOnly(answer, sources), showProvenance)
 		printSourceAudit(w, answer, sources)
 	}
 }
@@ -276,16 +292,21 @@ func validateSourcesMode(mode string) error {
 }
 
 func printSourcesWithHeading(w io.Writer, heading string, sources []rag.SourceChunk) {
+	printSourcesWithHeadingAndProvenance(w, heading, sources, false)
+}
+
+func printSourcesWithHeadingAndProvenance(w io.Writer, heading string, sources []rag.SourceChunk, showProvenance bool) {
 	if len(sources) == 0 {
 		return
 	}
 	fmt.Fprintln(w, heading)
 	for _, source := range sources {
 		fmt.Fprintln(w, SourceReference(source))
+		printSourceProvenance(w, source, showProvenance)
 	}
 }
 
-func printAllSourcesWithCitationMarkers(w io.Writer, answer string, sources []rag.SourceChunk) {
+func printAllSourcesWithCitationMarkers(w io.Writer, answer string, sources []rag.SourceChunk, showProvenance bool) {
 	if len(sources) == 0 {
 		return
 	}
@@ -297,7 +318,26 @@ func printAllSourcesWithCitationMarkers(w io.Writer, answer string, sources []ra
 			ref += "  (cited)"
 		}
 		fmt.Fprintln(w, ref)
+		printSourceProvenance(w, source, showProvenance)
 	}
+}
+
+func printSourceProvenance(w io.Writer, source rag.SourceChunk, showProvenance bool) {
+	if !showProvenance || source.Provenance == nil {
+		return
+	}
+	provenance := source.Provenance
+	line := fmt.Sprintf("  introduced by: %s", provenance.ToolName)
+	if provenance.Query != "" {
+		line += fmt.Sprintf(" query=%q", provenance.Query)
+	}
+	if provenance.Strategy != "" {
+		line += fmt.Sprintf(", strategy=%q", provenance.Strategy)
+	}
+	if provenance.Rank > 0 {
+		line += fmt.Sprintf(", rank=%d", provenance.Rank)
+	}
+	fmt.Fprintln(w, line)
 }
 
 func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk) {
@@ -331,6 +371,21 @@ func citedSourcesOnly(answer string, sources []rag.SourceChunk) []rag.SourceChun
 	return out
 }
 
+func uncitedSourcesOnly(answer string, sources []rag.SourceChunk) []rag.SourceChunk {
+	omit := citedSourceNumberSet(answer)
+	if len(omit) == 0 {
+		return sources
+	}
+	out := make([]rag.SourceChunk, 0, len(sources))
+	for _, source := range sources {
+		if _, ok := omit[source.SourceNumber]; ok {
+			continue
+		}
+		out = append(out, source)
+	}
+	return out
+}
+
 func citedSourceNumberSet(answer string) map[int]struct{} {
 	cited := rag.ExtractCitedSourceNumbers(answer)
 	out := make(map[int]struct{}, len(cited))
@@ -341,6 +396,12 @@ func citedSourceNumberSet(answer string) map[int]struct{} {
 }
 
 func printCoverageWarnings(w io.Writer, warnings []string) {
+	for _, warning := range warnings {
+		fmt.Fprintf(w, "agent %s\n", warning)
+	}
+}
+
+func printThinSourceWarnings(w io.Writer, warnings []string) {
 	for _, warning := range warnings {
 		fmt.Fprintf(w, "agent %s\n", warning)
 	}
@@ -369,6 +430,16 @@ func agentCoverageNudgeFromFlags(enable, disable bool) (*bool, error) {
 		return &value, nil
 	}
 	return nil, nil
+}
+
+func maxBroadExpansionQueriesFromFlag(value int) (int, error) {
+	if value < 0 {
+		return 0, errors.New("--max-agent-expansion-queries must be >= 0")
+	}
+	if value == 0 {
+		return -1, nil
+	}
+	return value, nil
 }
 
 func agentReadSourceToolFromFlags(enable, disable, enableChanged bool, question string) (bool, error) {

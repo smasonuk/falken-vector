@@ -277,7 +277,9 @@ func TestAnswerFromAgentSeparatesAvailableAndCitedSources(t *testing.T) {
 			{SourceNumber: 1, Path: "available.go", StartLine: 1, EndLine: 2},
 			{SourceNumber: 2, Path: "cited.go", StartLine: 3, EndLine: 4},
 		},
-		ToolCalls: []string{"search_index"},
+		ToolCalls:          []string{"search_index"},
+		ThinSourceWarnings: []string{"thin-source nudge: expanding [source 2]"},
+		ThinSourceNudged:   true,
 	})
 	if len(answer.Sources) != 2 || len(answer.AvailableSources) != 2 {
 		t.Fatalf("answer sources = %+v available=%+v, want all available", answer.Sources, answer.AvailableSources)
@@ -287,6 +289,9 @@ func TestAnswerFromAgentSeparatesAvailableAndCitedSources(t *testing.T) {
 	}
 	if len(answer.ToolCalls) != 1 || answer.ToolCalls[0].Name != "search_index" {
 		t.Fatalf("tool calls = %+v", answer.ToolCalls)
+	}
+	if !answer.ThinSourceNudged || len(answer.ThinSourceWarnings) != 1 {
+		t.Fatalf("thin-source status = %t warnings=%+v", answer.ThinSourceNudged, answer.ThinSourceWarnings)
 	}
 }
 

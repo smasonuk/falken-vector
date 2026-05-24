@@ -61,6 +61,65 @@ func TestSuggestFollowupQueriesAnchorsTermsToOriginalTopic(t *testing.T) {
 	}
 }
 
+func TestSuggestFollowupQueriesRejectsTranscriptFragments(t *testing.T) {
+	queries := SuggestFollowupQueries("AlphaFold", []rag.SourceChunk{{
+		Path: "alphafold/meetings/sdb.md",
+		Text: `So these two folders here which are shared completed and in progress.
+For example amaranthus is species. Outputs include FASTA, A3M, PDB, error JSON and NCBI tax IDs.`,
+	}}, 3)
+
+	got := strings.ToLower(strings.Join(queries, "\n"))
+	for _, bad := range []string{
+		"these two folders here",
+		"for example",
+		"amaranthus",
+		"species i",
+	} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("queries = %+v, leaked transcript fragment %q", queries, bad)
+		}
+	}
+	for _, want := range []string{"a3m", "pdb", "json", "ncbi"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("queries = %+v, want %q", queries, want)
+		}
+	}
+}
+
+func TestUsefulExpansionQueryQualityGate(t *testing.T) {
+	accepted := []string{
+		"AlphaFold A3M PDB JSON",
+		"protein folding PDB error JSON",
+	}
+	for _, query := range accepted {
+		if !usefulExpansionQuery(query, "AlphaFold") {
+			t.Fatalf("usefulExpansionQuery(%q) = false, want true", query)
+		}
+	}
+
+	rejected := []string{
+		"AlphaFold s these two folders here which are shared completed in progress Don several things",
+		"protein folding s going to it probably about 10 species",
+		"AlphaFold folders species amaranthus several project meeting notes unclear transcript ordinary tokens",
+	}
+	for _, query := range rejected {
+		if usefulExpansionQuery(query, "AlphaFold") {
+			t.Fatalf("usefulExpansionQuery(%q) = true, want false", query)
+		}
+	}
+}
+
+func TestSuggestAgentFollowupHintsAllowsUsefulNonTechnicalPhrases(t *testing.T) {
+	queries := SuggestAgentFollowupHints("deployment config", []rag.SourceChunk{{
+		Path: "ops/notes.md",
+		Text: `The rollout notes mention retry policy, timeout settings, cache invalidation, and header handling.`,
+	}}, 2)
+	got := strings.ToLower(strings.Join(queries, "\n"))
+	if !strings.Contains(got, "retry") || !strings.Contains(got, "timeout") {
+		t.Fatalf("queries = %+v, want useful ordinary hints", queries)
+	}
+}
+
 func TestSuggestFollowupQueriesEmptyWhenNoSourceTerms(t *testing.T) {
 	if got := SuggestFollowupQueries("hello", nil, 3); len(got) != 0 {
 		t.Fatalf("queries = %+v, want none", got)

@@ -47,12 +47,14 @@ type SearchToolOptions struct {
 	MaxSearchCalls      int
 	MaxTopK             int
 	MaxExpansionQueries int
+	MaxRetrievalCalls   int
 }
 
 type searchIndexToolState struct {
-	mu    sync.Mutex
-	calls int
-	opts  SearchToolOptions
+	mu             sync.Mutex
+	calls          int
+	retrievalCalls int
+	opts           SearchToolOptions
 }
 
 type searchIndexArgs struct {
@@ -135,8 +137,10 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 		strategy = "broad"
 	}
 	maxExpansionQueries := s.opts.MaxExpansionQueries
-	if maxExpansionQueries <= 0 {
-		maxExpansionQueries = 3
+	if maxExpansionQueries < 0 {
+		maxExpansionQueries = 0
+	} else if maxExpansionQueries == 0 {
+		maxExpansionQueries = 2
 	}
 
 	s.mu.Lock()
@@ -147,6 +151,9 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	s.calls++
 	s.mu.Unlock()
 
+	if !s.reserveRetrievalCall() {
+		return failedSearchToolResult("retrieval_call_limit", "search_index retrieval call limit exceeded", nil), nil
+	}
 	retrieveOpts, result, failure, ok := s.retrieveOnce(ctx, retrieveOpts, query, topK, mode, true)
 	if !ok {
 		return failure, nil
@@ -155,12 +162,17 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	internalPlans := []searchQueryPlanPayload{queryPlanPayload(seedPlan)}
 	retrievalCalls := 1
 	expansionQueries := []string{}
-	if strategy == "broad" && len(result.Chunks) != 0 {
+	if strategy == "broad" && len(result.Chunks) != 0 && maxExpansionQueries > 0 {
 		seedSources := sourceChunksFromRetrieved(result.Chunks)
-		expansionQueries = SuggestFollowupQueries(query, seedSources, maxExpansionQueries)
-		if len(expansionQueries) != 0 {
+		candidateExpansionQueries := SuggestBroadExpansionQueries(query, seedSources, maxExpansionQueries)
+		if len(candidateExpansionQueries) != 0 {
 			results := []rag.RetrieveResult{result}
-			for _, expansionQuery := range expansionQueries {
+			for _, expansionQuery := range candidateExpansionQueries {
+				if !s.reserveRetrievalCall() {
+					warnings = append(warnings, fmt.Sprintf("broad expansion stopped after %d expansion queries because max retrieval calls was reached", len(expansionQueries)))
+					break
+				}
+				expansionQueries = append(expansionQueries, expansionQuery)
 				expansionOpts := s.opts.RetrievalDefaults
 				expansionOpts.QueryPlannerMode = rag.QueryPlannerModeNone
 				expansionOpts.QueryPlanner = nil
@@ -177,7 +189,7 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	}
 	suggestedQueries := []string{}
 	if strategy == "focused" && len(result.Chunks) != 0 {
-		suggestedQueries = SuggestFollowupQueries(query, sourceChunksFromRetrieved(result.Chunks), 3)
+		suggestedQueries = SuggestAgentFollowupHints(query, sourceChunksFromRetrieved(result.Chunks), 3)
 	}
 
 	sources := make([]searchSourcePayload, 0, len(result.Chunks))
@@ -185,8 +197,14 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	newSources := 0
 	documentIDs := map[string]struct{}{}
 	seenSourceNumbers := map[int]struct{}{}
-	for _, chunk := range result.Chunks {
-		source := s.opts.Registry.Register(chunk)
+	for i, chunk := range result.Chunks {
+		source := s.opts.Registry.RegisterWithProvenance(chunk, &rag.SourceProvenance{
+			ToolName:      SearchIndexToolName,
+			Query:         query,
+			Strategy:      strategy,
+			Rank:          i + 1,
+			RetrievalCall: retrievalCalls,
+		})
 		if source.SourceNumber > beforeSourceCount {
 			if _, alreadySeen := seenSourceNumbers[source.SourceNumber]; !alreadySeen {
 				newSources++
@@ -228,6 +246,20 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 		Warnings:         warnings,
 	}
 	return successfulSearchToolResult(renderSearchToolContent(query, strategy, seedPlan, expansionQueries, suggestedQueries, sources, warnings, payload.NewSources, payload.DuplicateSources), payload), nil
+}
+
+func (s *searchIndexToolState) reserveRetrievalCall() bool {
+	maxRetrievalCalls := s.opts.MaxRetrievalCalls
+	if maxRetrievalCalls <= 0 {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retrievalCalls >= maxRetrievalCalls {
+		return false
+	}
+	s.retrievalCalls++
+	return true
 }
 
 func decodeSearchIndexArgs(raw json.RawMessage) (searchIndexArgs, error) {

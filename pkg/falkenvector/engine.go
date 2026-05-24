@@ -322,22 +322,24 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		return Answer{}, err
 	}
 	result, err := agentask.Run(ctx, agentask.Options{
-		Question:              request.Question,
-		Paths:                 e.paths,
-		Store:                 store,
-		RetrievalDefaults:     retrieval,
-		AgentLLM:              observableFalkenLLM{next: agentLLM, emit: emitter, config: e.config.Observability},
-		EmbedderFactory:       e.observableEmbedderFactory(emitter),
-		RetrieveWithPlan:      e.observableRetrieveWithPlan(emitter),
-		PrepareLexicalIndex:   prepareEngineLexicalIndex,
-		ConfigureQueryPlanner: e.configureQueryPlanner(emitter),
-		CitationPolicy:        toRAGCitationPolicy(request.CitationPolicy),
-		MaxSearchCalls:        request.MaxAgentSearches,
-		MaxToolTopK:           request.MaxToolTopK,
-		CoverageNudge:         coverageNudge,
-		MinBroadSearchCalls:   request.MinAgentSearches,
-		MaxCoverageRetries:    request.MaxCoverageRetries,
-		EnableReadSourceTool:  request.ReadSourceTool,
+		Question:                 request.Question,
+		Paths:                    e.paths,
+		Store:                    store,
+		RetrievalDefaults:        retrieval,
+		AgentLLM:                 observableFalkenLLM{next: agentLLM, emit: emitter, config: e.config.Observability},
+		EmbedderFactory:          e.observableEmbedderFactory(emitter),
+		RetrieveWithPlan:         e.observableRetrieveWithPlan(emitter),
+		PrepareLexicalIndex:      prepareEngineLexicalIndex,
+		ConfigureQueryPlanner:    e.configureQueryPlanner(emitter),
+		CitationPolicy:           toRAGCitationPolicy(request.CitationPolicy),
+		MaxSearchCalls:           request.MaxAgentSearches,
+		MaxToolTopK:              request.MaxToolTopK,
+		MaxBroadExpansionQueries: request.MaxAgentExpansionQueries,
+		MaxRetrievalCalls:        request.MaxAgentRetrievals,
+		CoverageNudge:            coverageNudge,
+		MinBroadSearchCalls:      request.MinAgentSearches,
+		MaxCoverageRetries:       request.MaxCoverageRetries,
+		EnableReadSourceTool:     request.ReadSourceTool,
 		Events: func(event falken.Event) {
 			converted := convertFalkenEvent(event)
 			if converted.Type == EventRunCompleted || converted.Type == EventRunFailed {
@@ -802,16 +804,18 @@ func answerFromAgent(result agentask.Result) Answer {
 	available := publicSources(result.Sources)
 	cited := publicSources(citedSourceChunks(result.Answer, result.Sources))
 	return Answer{
-		Text:             result.Answer,
-		Sources:          available,
-		CitedSources:     cited,
-		AvailableSources: available,
-		CitationWarnings: append([]string(nil), result.CitationWarnings...),
-		CitationValid:    result.CitationValid,
-		CoverageWarnings: append([]string(nil), result.CoverageWarnings...),
-		CoverageNudged:   result.CoverageNudged,
-		Retried:          result.Retried,
-		ToolCalls:        calls,
+		Text:               result.Answer,
+		Sources:            available,
+		CitedSources:       cited,
+		AvailableSources:   available,
+		CitationWarnings:   append([]string(nil), result.CitationWarnings...),
+		CitationValid:      result.CitationValid,
+		CoverageWarnings:   append([]string(nil), result.CoverageWarnings...),
+		CoverageNudged:     result.CoverageNudged,
+		ThinSourceWarnings: append([]string(nil), result.ThinSourceWarnings...),
+		ThinSourceNudged:   result.ThinSourceNudged,
+		Retried:            result.Retried,
+		ToolCalls:          calls,
 	}
 }
 
@@ -848,14 +852,16 @@ func citedSourceChunks(answer string, sources []rag.SourceChunk) []rag.SourceChu
 
 func answerEvent(answer Answer, config ObservabilityConfig) *AnswerEvent {
 	return &AnswerEvent{
-		Text:             observedText(answer.Text, config, config.EmitLLMResponses),
-		SourceCount:      len(answer.Sources),
-		CitationWarnings: append([]string(nil), answer.CitationWarnings...),
-		CitationValid:    answer.CitationValid,
-		CoverageWarnings: append([]string(nil), answer.CoverageWarnings...),
-		CoverageNudged:   answer.CoverageNudged,
-		Retried:          answer.Retried,
-		ToolCalls:        append([]ToolCallSummary(nil), answer.ToolCalls...),
+		Text:               observedText(answer.Text, config, config.EmitLLMResponses),
+		SourceCount:        len(answer.Sources),
+		CitationWarnings:   append([]string(nil), answer.CitationWarnings...),
+		CitationValid:      answer.CitationValid,
+		CoverageWarnings:   append([]string(nil), answer.CoverageWarnings...),
+		CoverageNudged:     answer.CoverageNudged,
+		ThinSourceWarnings: append([]string(nil), answer.ThinSourceWarnings...),
+		ThinSourceNudged:   answer.ThinSourceNudged,
+		Retried:            answer.Retried,
+		ToolCalls:          append([]ToolCallSummary(nil), answer.ToolCalls...),
 	}
 }
 

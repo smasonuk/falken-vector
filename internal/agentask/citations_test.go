@@ -27,6 +27,28 @@ func TestCitationRegistryDuplicateChunkIDReusesSourceNumber(t *testing.T) {
 	}
 }
 
+func TestCitationRegistryPreservesFirstIntroducedProvenance(t *testing.T) {
+	registry := NewCitationRegistry()
+	first := registry.RegisterWithProvenance(testRetrievedChunk("chunk-1", "README.md", "raw text", "indexed text"), &rag.SourceProvenance{
+		ToolName: SearchIndexToolName,
+		Query:    "AlphaFold",
+		Strategy: "focused",
+		Rank:     1,
+	})
+	second := registry.RegisterWithProvenance(testRetrievedChunk("chunk-1", "README.md", "changed text", "changed indexed"), &rag.SourceProvenance{
+		ToolName: SearchIndexToolName,
+		Query:    "protein folding",
+		Strategy: "broad",
+		Rank:     4,
+	})
+	if first.SourceNumber != second.SourceNumber {
+		t.Fatalf("sources = %+v %+v, want duplicate source number", first, second)
+	}
+	if second.Provenance == nil || second.Provenance.Query != "AlphaFold" || second.Provenance.Strategy != "focused" || second.Provenance.Rank != 1 {
+		t.Fatalf("provenance = %+v, want first-introduced provenance", second.Provenance)
+	}
+}
+
 func TestCitationRegistryEmptyChunkIDDedupesByFallbackKey(t *testing.T) {
 	registry := NewCitationRegistry()
 	first := registry.Register(testRetrievedChunk("", "README.md", "raw text", "indexed text"))

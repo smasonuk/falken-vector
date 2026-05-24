@@ -149,11 +149,13 @@ type ToolResultEvent struct {
 type AnswerEvent struct {
 	Text string `json:"text,omitempty"`
 	// SourceCount is the number of available sources returned with Answer.Sources.
-	SourceCount      int               `json:"source_count,omitempty"`
-	CitationWarnings []string          `json:"citation_warnings,omitempty"`
-	CitationValid    bool              `json:"citation_valid,omitempty"`
-	CoverageWarnings []string          `json:"coverage_warnings,omitempty"`
-	CoverageNudged   bool              `json:"coverage_nudged,omitempty"`
-	Retried          bool              `json:"retried,omitempty"`
-	ToolCalls        []ToolCallSummary `json:"tool_calls,omitempty"`
+	SourceCount        int               `json:"source_count,omitempty"`
+	CitationWarnings   []string          `json:"citation_warnings,omitempty"`
+	CitationValid      bool              `json:"citation_valid,omitempty"`
+	CoverageWarnings   []string          `json:"coverage_warnings,omitempty"`
+	CoverageNudged     bool              `json:"coverage_nudged,omitempty"`
+	ThinSourceWarnings []string          `json:"thin_source_warnings,omitempty"`
+	ThinSourceNudged   bool              `json:"thin_source_nudged,omitempty"`
+	Retried            bool              `json:"retried,omitempty"`
+	ToolCalls          []ToolCallSummary `json:"tool_calls,omitempty"`
 }

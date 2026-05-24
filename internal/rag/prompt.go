@@ -30,6 +30,15 @@ type SourceChunk struct {
 	EndLine      int
 	Text         string
 	Score        float32
+	Provenance   *SourceProvenance
+}
+
+type SourceProvenance struct {
+	ToolName      string
+	Query         string
+	Strategy      string
+	Rank          int
+	RetrievalCall int
 }
 
 type BuiltPrompt struct {

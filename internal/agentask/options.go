@@ -43,13 +43,24 @@ type Options struct {
 	MaxToolTopK    int
 
 	// MaxBroadExpansionQueries limits internal follow-up retrievals for one broad search.
-	// Values <= 0 use the default.
+	// Zero uses the default; negative disables broad expansion.
 	MaxBroadExpansionQueries int
+	// MaxRetrievalCalls limits actual retrieval operations across search_index calls.
+	// Values <= 0 leave retrievals uncapped.
+	MaxRetrievalCalls int
 
 	// CoverageNudge controls broad-question coverage retries. Nil uses the default-on policy.
 	CoverageNudge       *bool
 	MinBroadSearchCalls int
 	MaxCoverageRetries  int
+
+	// ThinSourceNudge controls broad-question retries that expand very short cited source spans.
+	// Nil uses the default-on policy.
+	ThinSourceNudge         *bool
+	MaxThinSourceRetries    int
+	MaxThinSourcesToExpand  int
+	ThinSourceLineThreshold int
+	ThinSourceContextLines  int
 
 	EnableReadSourceTool bool
 
@@ -57,15 +68,17 @@ type Options struct {
 }
 
 type Result struct {
-	Answer           string
-	Sources          []rag.SourceChunk
-	CitationWarnings []string
-	CitationValid    bool
-	CoverageWarnings []string
-	CoverageNudged   bool
-	Retried          bool
-	ToolCalls        []string
-	Trace            AgentTrace
+	Answer             string
+	Sources            []rag.SourceChunk
+	CitationWarnings   []string
+	CitationValid      bool
+	CoverageWarnings   []string
+	CoverageNudged     bool
+	ThinSourceWarnings []string
+	ThinSourceNudged   bool
+	Retried            bool
+	ToolCalls          []string
+	Trace              AgentTrace
 }
 
 // AgentTrace records structured tool activity for an agent ask run.

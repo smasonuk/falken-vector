@@ -26,6 +26,10 @@ func NewCitationRegistry() *CitationRegistry {
 }
 
 func (r *CitationRegistry) Register(chunk rag.RetrievedChunk) rag.SourceChunk {
+	return r.RegisterWithProvenance(chunk, nil)
+}
+
+func (r *CitationRegistry) RegisterWithProvenance(chunk rag.RetrievedChunk, provenance *rag.SourceProvenance) rag.SourceChunk {
 	if r == nil {
 		r = NewCitationRegistry()
 	}
@@ -44,6 +48,10 @@ func (r *CitationRegistry) Register(chunk rag.RetrievedChunk) rag.SourceChunk {
 		EndLine:      chunk.Chunk.EndLine,
 		Text:         chunk.Chunk.ChunkText,
 		Score:        chunk.Score,
+	}
+	if provenance != nil {
+		copied := *provenance
+		source.Provenance = &copied
 	}
 	r.next++
 	r.byKey[key] = source

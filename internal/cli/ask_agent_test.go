@@ -240,10 +240,11 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 			}`),
 		}})
 		return agentask.Result{
-			Answer:           "agent answer",
-			ToolCalls:        []string{"search_index"},
-			CitationWarnings: []string{"answer did not cite any source"},
-			CoverageWarnings: []string{"coverage nudge skipped: search call limit reached"},
+			Answer:             "agent answer",
+			ToolCalls:          []string{"search_index"},
+			CitationWarnings:   []string{"answer did not cite any source"},
+			CoverageWarnings:   []string{"coverage nudge skipped: search call limit reached"},
+			ThinSourceWarnings: []string{"thin-source nudge: expanding [source 1]"},
 		}
 	})
 	defer restore()
@@ -267,6 +268,9 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "agent coverage nudge skipped: search call limit reached") {
 		t.Fatalf("stderr = %q, want coverage warning in debug output", stderr)
+	}
+	if !strings.Contains(stderr, "agent thin-source nudge: expanding [source 1]") {
+		t.Fatalf("stderr = %q, want thin-source debug output", stderr)
 	}
 	if !strings.Contains(stderr, "warning: answer did not cite any source") {
 		t.Fatalf("stderr = %q, want warning", stderr)
@@ -303,6 +307,43 @@ func TestAskAgentPassesCoverageAndReadSourceFlags(t *testing.T) {
 
 	cmd := NewRootCommand()
 	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-coverage-nudge", "--min-agent-searches", "3", "--max-agent-coverage-retries", "2", "--agent-read-source-tool"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentPassesExpansionQueryBudget(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.MaxBroadExpansionQueries != 4 {
+			t.Fatalf("MaxBroadExpansionQueries = %d, want 4", opts.MaxBroadExpansionQueries)
+		}
+		if opts.MaxRetrievalCalls != 16 {
+			t.Fatalf("MaxRetrievalCalls = %d, want 16", opts.MaxRetrievalCalls)
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--max-agent-expansion-queries", "4", "--max-agent-retrievals", "16"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentExpansionQueryBudgetZeroDisablesExpansion(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.MaxBroadExpansionQueries != -1 {
+			t.Fatalf("MaxBroadExpansionQueries = %d, want internal disable marker", opts.MaxBroadExpansionQueries)
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--max-agent-expansion-queries", "0"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -412,13 +453,14 @@ func TestAskAgentResultWithSourcePrintsReference(t *testing.T) {
 	for _, want := range []string{
 		"Sources cited:",
 		"[source 1] internal/rag/retrieve.go:35-73",
-		"Sources available to the agent:",
-		"[source 1] internal/rag/retrieve.go:35-73  (cited)",
 		"Source audit:",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want %q", output, want)
 		}
+	}
+	if strings.Contains(output, "Other sources available to the agent:") || strings.Contains(output, "(cited)") {
+		t.Fatalf("output = %q, want no repeated cited source in both mode", output)
 	}
 }
 
@@ -446,13 +488,15 @@ func TestAskAgentDefaultsToBothSourceMode(t *testing.T) {
 	for _, want := range []string{
 		"Sources cited:",
 		"[source 2] cited.go:3-4",
-		"Sources available to the agent:",
+		"Other sources available to the agent:",
 		"[source 1] available.go:1-2",
-		"[source 2] cited.go:3-4  (cited)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want %q", output, want)
 		}
+	}
+	if strings.Contains(output, "[source 2] cited.go:3-4  (cited)") {
+		t.Fatalf("output = %q, want cited source only in cited section", output)
 	}
 }
 
@@ -509,9 +553,8 @@ func TestAskAgentSourcesBothPrintsCitedAndAllSources(t *testing.T) {
 	for _, want := range []string{
 		"Sources cited:",
 		"[source 2] cited.go:3-4",
-		"Sources available to the agent:",
+		"Other sources available to the agent:",
 		"[source 1] available.go:1-2",
-		"[source 2] cited.go:3-4  (cited)",
 		"Source audit:",
 		"- available to agent: 2",
 		"- cited in answer: 1",
@@ -520,6 +563,9 @@ func TestAskAgentSourcesBothPrintsCitedAndAllSources(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want %q", output, want)
 		}
+	}
+	if strings.Contains(output, "[source 2] cited.go:3-4  (cited)") {
+		t.Fatalf("output = %q, want cited source only in cited section for both mode", output)
 	}
 }
 
@@ -559,6 +605,43 @@ func TestAskAgentSourcesAllPrintsRetrievedSources(t *testing.T) {
 	}
 	if strings.Contains(output, "Sources cited:") {
 		t.Fatalf("output = %q, did not want cited section for --sources all", output)
+	}
+}
+
+func TestAskAgentSourcesAllCanPrintSourceProvenance(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 2].",
+			Sources: []rag.SourceChunk{
+				{
+					SourceNumber: 1,
+					Path:         "available.go",
+					StartLine:    1,
+					EndLine:      2,
+					Provenance: &rag.SourceProvenance{
+						ToolName: agentask.SearchIndexToolName,
+						Query:    "AlphaFold",
+						Strategy: "broad",
+						Rank:     4,
+					},
+				},
+				{SourceNumber: 2, Path: "cited.go", StartLine: 3, EndLine: 4},
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "all", "--show-source-provenance"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, `introduced by: search_index query="AlphaFold", strategy="broad", rank=4`) {
+		t.Fatalf("output = %q, want provenance line", output)
 	}
 }
 

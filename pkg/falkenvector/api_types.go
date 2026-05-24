@@ -115,10 +115,11 @@ const (
 // AskRequest asks the engine to answer a question.
 //
 // Retrieval overrides engine defaults for this call. Agent enables the tool
-// calling path. CitationPolicy defaults to validate-and-retry. MaxAgentSearches
-// and MaxToolTopK use agent defaults when zero. AgentCoverage controls the
-// default broad-question coverage nudge, which asks the agent to perform
-// additional searches for exploratory questions. ReadSourceTool is off by default.
+// calling path. CitationPolicy defaults to validate-and-retry. MaxAgentSearches,
+// MaxToolTopK, and MaxAgentExpansionQueries use agent defaults when zero.
+// AgentCoverage controls the default broad-question coverage nudge, which asks
+// the agent to perform additional searches for exploratory questions.
+// ReadSourceTool is off by default.
 type AskRequest struct {
 	Question string
 
@@ -130,6 +131,12 @@ type AskRequest struct {
 
 	MaxAgentSearches int
 	MaxToolTopK      int
+	// MaxAgentExpansionQueries limits internal broad-search expansion queries.
+	// Zero uses the agent default.
+	MaxAgentExpansionQueries int
+	// MaxAgentRetrievals limits actual retrieval calls across agent searches.
+	// Zero leaves retrievals uncapped.
+	MaxAgentRetrievals int
 
 	AgentCoverage      AgentCoveragePolicy
 	MinAgentSearches   int
@@ -149,11 +156,13 @@ type Answer struct {
 	// AvailableSources mirrors Sources for callers that want explicit naming.
 	AvailableSources []Source
 
-	CitationWarnings []string
-	CitationValid    bool
-	CoverageWarnings []string
-	CoverageNudged   bool
-	Retried          bool
+	CitationWarnings   []string
+	CitationValid      bool
+	CoverageWarnings   []string
+	CoverageNudged     bool
+	ThinSourceWarnings []string
+	ThinSourceNudged   bool
+	Retried            bool
 
 	ToolCalls []ToolCallSummary
 }

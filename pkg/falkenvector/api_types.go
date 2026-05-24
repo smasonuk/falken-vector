@@ -1,0 +1,232 @@
+package falkenvector
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"github.com/smasonuk/falken-core/pkg/falken"
+)
+
+// ModelConfig describes an OpenAI-compatible model endpoint.
+//
+// Empty BaseURL and Model values use SDK defaults when the model is needed.
+// Headers are copied before use.
+type ModelConfig struct {
+	APIKey  string
+	BaseURL string
+	Model   string
+	Headers map[string]string
+}
+
+// EngineConfig configures a public Falken Vector engine.
+//
+// StateDir defaults to the CLI state directory when left empty. Retrieval uses
+// lexical mode by default. Events is optional and nil means no events are
+// delivered. Observability defaults are conservative and do not include raw
+// prompt, embedding input, or retrieved chunk text. AgentLLM is optional for
+// callers that already have a Falken-compatible agent model.
+type EngineConfig struct {
+	StateDir string
+
+	Embedding ModelConfig
+	Chat      ModelConfig
+
+	Retrieval RetrievalOptions
+	Events    EventSink
+
+	Observability ObservabilityConfig
+
+	HTTPClient HTTPClient
+
+	// AgentLLM optionally injects a Falken-compatible LLM for agent mode.
+	AgentLLM FalkenLLM
+}
+
+// HTTPClient is the minimal HTTP client contract used by the SDK.
+type HTTPClient interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+// RetrievalMode selects the retrieval backend. Empty defaults to lexical.
+type RetrievalMode string
+
+const (
+	RetrievalVector  RetrievalMode = "vector"
+	RetrievalLexical RetrievalMode = "lexical"
+	RetrievalHybrid  RetrievalMode = "hybrid"
+)
+
+// RerankerMode selects an optional reranking strategy. Empty defaults to none.
+type RerankerMode string
+
+const (
+	RerankerNone      RerankerMode = "none"
+	RerankerHeuristic RerankerMode = "heuristic"
+)
+
+// QueryPlannerMode selects optional query expansion. Empty defaults to none.
+type QueryPlannerMode string
+
+const (
+	QueryPlannerNone      QueryPlannerMode = "none"
+	QueryPlannerHeuristic QueryPlannerMode = "heuristic"
+	QueryPlannerLLM       QueryPlannerMode = "llm"
+)
+
+// RetrievalOptions configures query-time retrieval.
+//
+// TopK defaults to the internal retrieval default. Candidate counts, when zero,
+// are derived from TopK by the retrieval layer. IncludeGlobs, ExcludeGlobs, and
+// SourceRoots narrow the source corpus when provided.
+type RetrievalOptions struct {
+	Mode              RetrievalMode
+	Reranker          RerankerMode
+	QueryPlanner      QueryPlannerMode
+	TopK              int
+	CandidateK        int
+	VectorCandidateK  int
+	LexicalCandidateK int
+	MaxSubqueries     int
+
+	IncludeGlobs []string
+	ExcludeGlobs []string
+	SourceRoots  []string
+}
+
+// CitationPolicy controls answer citation validation. Empty defaults to
+// CitationValidateAndRetry.
+type CitationPolicy string
+
+const (
+	CitationValidateAndRetry CitationPolicy = "validate-and-retry"
+	CitationValidateOnly     CitationPolicy = "validate-only"
+	CitationOff              CitationPolicy = "off"
+)
+
+// AskRequest asks the engine to answer a question.
+//
+// Retrieval overrides engine defaults for this call. Agent enables the tool
+// calling path. CitationPolicy defaults to validate-and-retry. MaxAgentSearches
+// and MaxToolTopK use agent defaults when zero. ReadSourceTool is off by
+// default.
+type AskRequest struct {
+	Question string
+
+	Retrieval RetrievalOptions
+
+	Agent bool
+
+	CitationPolicy CitationPolicy
+
+	MaxAgentSearches int
+	MaxToolTopK      int
+
+	ReadSourceTool bool
+}
+
+// Answer is the structured answer returned by Ask.
+type Answer struct {
+	Text string
+
+	Sources []Source
+
+	CitationWarnings []string
+	CitationValid    bool
+	Retried          bool
+
+	ToolCalls []ToolCallSummary
+}
+
+// QueryRequest asks the engine to retrieve supporting chunks without answering.
+type QueryRequest struct {
+	Question  string
+	Retrieval RetrievalOptions
+}
+
+// QueryResult is the structured retrieval result returned by Query.
+type QueryResult struct {
+	Question  string
+	Chunks    []RetrievedChunk
+	QueryPlan QueryPlan
+}
+
+// Source identifies a source span in an indexed document.
+type Source struct {
+	Number    int
+	Path      string
+	StartLine int
+	EndLine   int
+}
+
+// RetrievedChunk describes an indexed chunk returned by retrieval.
+type RetrievedChunk struct {
+	Source
+
+	Score      float32
+	ChunkID    string
+	DocumentID string
+	Text       string
+}
+
+// QueryPlan describes generated retrieval queries.
+type QueryPlan struct {
+	Mode    string
+	Queries []string
+	Warning string
+}
+
+// ToolCallSummary records a tool call observed while answering.
+type ToolCallSummary struct {
+	Name string
+	ID   string
+}
+
+// Status summarizes the current index state.
+type Status struct {
+	StateDir     string
+	ManifestPath string
+	VectorPath   string
+
+	Documents StatusDocumentCounts
+	Chunks    StatusChunkCounts
+
+	LastIndexedAt *time.Time
+}
+
+// StatusDocumentCounts contains document status totals.
+type StatusDocumentCounts struct {
+	Indexed int
+	Error   int
+	Deleted int
+}
+
+// StatusChunkCounts contains active and inactive chunk totals.
+type StatusChunkCounts struct {
+	Active   int
+	Inactive int
+}
+
+// CompactRequest configures vector database compaction.
+type CompactRequest struct {
+	DryRun     bool
+	BatchSize  int
+	KeepBackup bool
+}
+
+// CompactResult summarizes a compaction run.
+type CompactResult struct {
+	ActiveChunks     int
+	InactiveChunks   int
+	ReembeddedChunks int
+	UpdatedChunks    int
+	EmbeddingModel   string
+	BackupPath       string
+	PendingRuns      int
+	Warnings         []string
+}
+
+// FalkenLLM is the Falken Core LLM contract accepted by agent mode.
+type FalkenLLM interface {
+	Complete(context.Context, falken.CompletionRequest) (falken.CompletionResponse, error)
+}

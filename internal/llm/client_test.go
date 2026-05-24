@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	falkenvector "github.com/smasonuk/falken-vector"
+	"github.com/smasonuk/falken-vector/pkg/embeddings"
 )
 
 func TestEmbedderConvertsEmbedding(t *testing.T) {
-	embedder := NewEmbedder(fakeEmbeddingClient{response: falkenvector.EmbeddingResponse{
+	embedder := NewEmbedder(fakeEmbeddingClient{response: embeddings.EmbeddingResponse{
 		Model:     "text-embedding-3-small",
 		Embedding: []float64{1.5, -2.25},
 	}})
@@ -28,7 +28,7 @@ func TestEmbedderConvertsEmbedding(t *testing.T) {
 }
 
 func TestEmbedderRejectsEmptyVector(t *testing.T) {
-	embedder := NewEmbedder(fakeEmbeddingClient{response: falkenvector.EmbeddingResponse{Model: "m"}})
+	embedder := NewEmbedder(fakeEmbeddingClient{response: embeddings.EmbeddingResponse{Model: "m"}})
 	_, err := embedder.EmbedText(context.Background(), "hello")
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("EmbedText error = %v, want empty vector", err)
@@ -44,7 +44,7 @@ func TestChatClientCompleteSuccess(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer key" {
 			t.Errorf("authorization = %q", got)
 		}
-		if got := r.Header.Get("X-Portkey-Provider"); got != falkenvector.DefaultPortkeyProvider {
+		if got := r.Header.Get("X-Portkey-Provider"); got != embeddings.DefaultPortkeyProvider {
 			t.Errorf("provider = %q", got)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -59,7 +59,7 @@ func TestChatClientCompleteSuccess(t *testing.T) {
 		BaseURL: server.URL,
 		APIKey:  "key",
 		Model:   "gpt-test",
-		Headers: map[string]string{"X-Portkey-Provider": falkenvector.DefaultPortkeyProvider},
+		Headers: map[string]string{"X-Portkey-Provider": embeddings.DefaultPortkeyProvider},
 	})
 	if err != nil {
 		t.Fatalf("NewChatClient: %v", err)
@@ -119,7 +119,7 @@ func TestEnvChatClientOnlyAddsPortkeyHeaderForDefaultBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEnvChatClient default: %v", err)
 	}
-	if defaultClient.headers["X-Portkey-Provider"] != falkenvector.DefaultPortkeyProvider {
+	if defaultClient.headers["X-Portkey-Provider"] != embeddings.DefaultPortkeyProvider {
 		t.Fatalf("default headers = %+v, want Portkey provider", defaultClient.headers)
 	}
 
@@ -142,10 +142,10 @@ func TestEnvChatClientOnlyAddsPortkeyHeaderForDefaultBaseURL(t *testing.T) {
 }
 
 type fakeEmbeddingClient struct {
-	response falkenvector.EmbeddingResponse
+	response embeddings.EmbeddingResponse
 	err      error
 }
 
-func (f fakeEmbeddingClient) Embed(context.Context, falkenvector.EmbeddingRequest) (falkenvector.EmbeddingResponse, error) {
+func (f fakeEmbeddingClient) Embed(context.Context, embeddings.EmbeddingRequest) (embeddings.EmbeddingResponse, error) {
 	return f.response, f.err
 }

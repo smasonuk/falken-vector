@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	falkenvector "github.com/smasonuk/falken-vector"
+	"github.com/smasonuk/falken-vector/pkg/embeddings"
 )
 
 const (
@@ -28,7 +28,7 @@ var ErrMissingAPIKey = errors.New("api key is required")
 
 type OpenAIEmbedder struct {
 	client interface {
-		Embed(context.Context, falkenvector.EmbeddingRequest) (falkenvector.EmbeddingResponse, error)
+		Embed(context.Context, embeddings.EmbeddingRequest) (embeddings.EmbeddingResponse, error)
 	}
 }
 
@@ -40,7 +40,7 @@ func NewEnvEmbedder(getenv func(string) string) (*OpenAIEmbedder, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("%w: set %s", ErrMissingAPIKey, EnvEmbeddingModelAPIKey)
 	}
-	config := falkenvector.PortkeyConfig(apiKey)
+	config := embeddings.PortkeyConfig(apiKey)
 	if model := strings.TrimSpace(getenv(EnvEmbeddingModel)); model != "" {
 		config.Model = model
 	}
@@ -50,7 +50,7 @@ func NewEnvEmbedder(getenv func(string) string) (*OpenAIEmbedder, error) {
 			delete(config.Headers, "X-Portkey-Provider")
 		}
 	}
-	client, err := falkenvector.New(config)
+	client, err := embeddings.New(config)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +58,7 @@ func NewEnvEmbedder(getenv func(string) string) (*OpenAIEmbedder, error) {
 }
 
 func NewEmbedder(client interface {
-	Embed(context.Context, falkenvector.EmbeddingRequest) (falkenvector.EmbeddingResponse, error)
+	Embed(context.Context, embeddings.EmbeddingRequest) (embeddings.EmbeddingResponse, error)
 }) *OpenAIEmbedder {
 	return &OpenAIEmbedder{client: client}
 }
@@ -70,7 +70,7 @@ func (e *OpenAIEmbedder) EmbedText(ctx context.Context, input string) (Embedding
 	if strings.TrimSpace(input) == "" {
 		return Embedding{}, errors.New("embedding input is required")
 	}
-	response, err := e.client.Embed(ctx, falkenvector.EmbeddingRequest{Input: input})
+	response, err := e.client.Embed(ctx, embeddings.EmbeddingRequest{Input: input})
 	if err != nil {
 		return Embedding{}, err
 	}
@@ -104,7 +104,7 @@ func NewEnvChatClient(getenv func(string) string) (*ChatClient, error) {
 	}
 	baseURL := strings.TrimSpace(getenv(EnvLLMBaseURL))
 	if baseURL == "" {
-		baseURL = falkenvector.DefaultPortkeyBaseURL
+		baseURL = embeddings.DefaultPortkeyBaseURL
 	}
 	model := strings.TrimSpace(getenv(EnvLLMModel))
 	if model == "" {
@@ -113,7 +113,7 @@ func NewEnvChatClient(getenv func(string) string) (*ChatClient, error) {
 	headers := map[string]string(nil)
 	if isDefaultPortkeyBaseURL(baseURL) {
 		headers = map[string]string{
-			"X-Portkey-Provider": falkenvector.DefaultPortkeyProvider,
+			"X-Portkey-Provider": embeddings.DefaultPortkeyProvider,
 		}
 	}
 	return NewChatClient(ChatConfig{
@@ -141,7 +141,7 @@ func NewChatClient(config ChatConfig) (*ChatClient, error) {
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(config.BaseURL), "/")
 	if baseURL == "" {
-		baseURL = falkenvector.DefaultPortkeyBaseURL
+		baseURL = embeddings.DefaultPortkeyBaseURL
 	}
 	model := strings.TrimSpace(config.Model)
 	if model == "" {
@@ -263,5 +263,5 @@ func apiError(label string, statusCode int, body []byte) error {
 }
 
 func isDefaultPortkeyBaseURL(baseURL string) bool {
-	return strings.TrimRight(strings.TrimSpace(baseURL), "/") == strings.TrimRight(falkenvector.DefaultPortkeyBaseURL, "/")
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/") == strings.TrimRight(embeddings.DefaultPortkeyBaseURL, "/")
 }

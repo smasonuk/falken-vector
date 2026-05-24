@@ -8,8 +8,8 @@ import (
 
 	"github.com/smasonuk/falken-core/pkg/falken"
 	falkenlangchain "github.com/smasonuk/falken-extra/llm/langchaingo"
-	falkenvector "github.com/smasonuk/falken-vector"
 	"github.com/smasonuk/falken-vector/internal/llm"
+	"github.com/smasonuk/falken-vector/pkg/embeddings"
 	"github.com/tmc/langchaingo/llms/openai"
 )
 
@@ -46,7 +46,7 @@ func newCLIAgentLLMFromEnv(getenv func(string) string) (falken.LLM, error) {
 
 	baseURL := strings.TrimSpace(getenv(llm.EnvLLMBaseURL))
 	if baseURL == "" {
-		baseURL = falkenvector.DefaultPortkeyBaseURL
+		baseURL = embeddings.DefaultPortkeyBaseURL
 	}
 	modelName := strings.TrimSpace(getenv(llm.EnvLLMModel))
 	if modelName == "" {
@@ -56,7 +56,7 @@ func newCLIAgentLLMFromEnv(getenv func(string) string) (falken.LLM, error) {
 	options := []openai.Option{openai.WithToken(apiKey), openai.WithModel(modelName), openai.WithBaseURL(baseURL)}
 	if isDefaultPortkeyBaseURLForCLI(baseURL) {
 		options = append(options, openai.WithHTTPClient(falkenlangchain.NewHeaderHTTPClient(http.DefaultClient, map[string]string{
-			"X-Portkey-Provider": falkenvector.DefaultPortkeyProvider,
+			"X-Portkey-Provider": embeddings.DefaultPortkeyProvider,
 		})))
 	}
 	model, err := openai.New(options...)
@@ -67,5 +67,5 @@ func newCLIAgentLLMFromEnv(getenv func(string) string) (falken.LLM, error) {
 }
 
 func isDefaultPortkeyBaseURLForCLI(baseURL string) bool {
-	return strings.TrimRight(strings.TrimSpace(baseURL), "/") == strings.TrimRight(falkenvector.DefaultPortkeyBaseURL, "/")
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/") == strings.TrimRight(embeddings.DefaultPortkeyBaseURL, "/")
 }

@@ -91,7 +91,7 @@ func newIngestCommand(opts *options) *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&extensions, "extensions", ingest.DefaultExtensionsString(), "comma-separated file extensions to index")
+	cmd.Flags().StringVar(&extensions, "extensions", "", "restrict indexing to comma-separated file extensions")
 	cmd.Flags().StringVar(&chunker, "chunker", "auto", "chunking strategy: auto, fixed, markdown, text, or code")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1200, "target maximum chunk size in characters")
 	cmd.Flags().IntVar(&chunkOverlap, "chunk-overlap", 200, "overlap in characters for fixed chunking and large-section fallback")

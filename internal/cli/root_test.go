@@ -42,6 +42,19 @@ func TestHelpCommand(t *testing.T) {
 	}
 }
 
+func TestIngestHelpDescribesExtensionsAsRestriction(t *testing.T) {
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"ingest", "--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out.String(), "restrict indexing to comma-separated file extensions") {
+		t.Fatalf("ingest help output = %q, want --extensions restriction help", out.String())
+	}
+}
+
 func TestCommandContextUsesDefaultTimeout(t *testing.T) {
 	cmd := NewRootCommand()
 	ctx, cancel := commandContext(cmd, &options{timeout: config.DefaultTimeout})
@@ -156,7 +169,7 @@ func TestResetRefusesUnsafeStateDirWithoutForce(t *testing.T) {
 
 func TestIngestDryRunDoesNotCreateStateDirOrNeedAPIKey(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "README"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	state := filepath.Join(root, ".falkengo")

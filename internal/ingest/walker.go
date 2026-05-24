@@ -2,17 +2,22 @@ package ingest
 
 import (
 	"context"
+	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/smasonuk/falken-vector/internal/config"
 )
 
 var DefaultExtensions = []string{".txt", ".md", ".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml", ".toml"}
+
+const textSniffBytes = 8192
 
 type WalkOptions struct {
 	Root       string
@@ -45,6 +50,7 @@ func FindCandidateFiles(ctx context.Context, opts WalkOptions) ([]CandidateFile,
 		return nil, err
 	}
 	extensions := extensionSet(opts.Extensions)
+	restrictExtensions := len(extensions) != 0
 	files := make([]CandidateFile, 0)
 
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -79,12 +85,22 @@ func FindCandidateFiles(ctx context.Context, opts WalkOptions) ([]CandidateFile,
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(name))
-		if !hiddenAllowed && !extensions[ext] {
+		if !hiddenAllowed && restrictExtensions && !extensions[ext] {
 			return nil
 		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		textLike, err := isTextLikeFile(path)
+		if err != nil {
+			return err
+		}
+		if !textLike {
+			return nil
 		}
 		files = append(files, CandidateFile{
 			Path:       filepath.Clean(path),
@@ -101,9 +117,6 @@ func FindCandidateFiles(ctx context.Context, opts WalkOptions) ([]CandidateFile,
 }
 
 func extensionSet(values []string) map[string]bool {
-	if len(values) == 0 {
-		values = DefaultExtensions
-	}
 	set := make(map[string]bool, len(values))
 	for _, value := range values {
 		ext := strings.ToLower(strings.TrimSpace(value))
@@ -116,6 +129,54 @@ func extensionSet(values []string) map[string]bool {
 		set[ext] = true
 	}
 	return set
+}
+
+func isTextLikeFile(path string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	buf := make([]byte, textSniffBytes)
+	n, err := file.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	if n == 0 {
+		return true, nil
+	}
+	sample := buf[:n]
+	for _, b := range sample {
+		if b == 0 {
+			return false, nil
+		}
+	}
+	if !validUTF8Sample(sample, n == textSniffBytes) {
+		return false, nil
+	}
+	control := 0
+	for _, b := range sample {
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' && b != '\f' {
+			control++
+		}
+	}
+	return control*10 <= len(sample)*3, nil
+}
+
+func validUTF8Sample(sample []byte, mayEndMidRune bool) bool {
+	if utf8.Valid(sample) {
+		return true
+	}
+	if !mayEndMidRune {
+		return false
+	}
+	for trim := 1; trim < utf8.UTFMax && trim < len(sample); trim++ {
+		if utf8.Valid(sample[:len(sample)-trim]) {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldSkipDir(name string) bool {

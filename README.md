@@ -70,17 +70,13 @@ falkengo repair
 falkengo reset
 ```
 
-Default indexed extensions are:
-
-```text
-.txt,.md,.go,.py,.js,.ts,.tsx,.jsx,.json,.yaml,.yml,.toml
-```
+By default, ingest indexes text-like files discovered by content sniffing. Use `--extensions .md,.go` to restrict indexing to specific file extensions.
 
 Use `--state-dir` to choose another project-local state directory, `--timeout` to control command timeouts, and `--verbose` for detailed progress. `ingest` and `compact` do not apply the default timeout because they can run for a long time; pass `--timeout` explicitly to bound those commands.
 
 ## Commands
 
-`falkengo ingest <directory>` scans files, skips unchanged indexed files, chunks changed files, embeds chunks, stores vectors in Vecgo, and stores metadata in SQLite. It prints progress as it scans, embeds, commits the vector database, and updates the manifest; add `--verbose` for per-file skip and error details. Use `--chunker auto|fixed|markdown|text|code` to choose the chunking strategy; `auto` is the default and selects Markdown, prose, or code chunking from the file extension. Ingest embeds a contextual indexed form of each chunk that includes short path/heading/symbol metadata, while raw chunk text is still kept for display and prompts. Add `--sync-source` to treat that directory as the source of truth and logically delete previously indexed files from that same source root when they are no longer present on disk.
+`falkengo ingest <directory>` scans text-like files, skips unchanged indexed files, chunks changed files, embeds chunks, stores vectors in Vecgo, and stores metadata in SQLite. It prints progress as it scans, embeds, commits the vector database, and updates the manifest; add `--verbose` for per-file skip and error details. Use `--extensions .md,.go` to restrict discovery to specific extensions. Use `--chunker auto|fixed|markdown|text|code` to choose the chunking strategy; `auto` is the default and selects Markdown, prose, or code chunking from the file extension, with unknown text files chunked as plain text. Ingest embeds a contextual indexed form of each chunk that includes short path/heading/symbol metadata, while raw chunk text is still kept for display and prompts. Add `--sync-source` to treat that directory as the source of truth and logically delete previously indexed files from that same source root when they are no longer present on disk.
 
 `falkengo query <question>` retrieves relevant chunks and prints editor-friendly source references like `[source 1] internal/rag/retrieve.go:35-73`. It does not call the LLM unless `--query-planner llm` is explicitly selected. Use `--retrieval vector`, `--retrieval lexical`, or `--retrieval hybrid`; vector remains the default. Lexical mode searches SQLite FTS over paths and contextual indexed text, while hybrid mode fuses vector and lexical ranks. Add `--reranker heuristic` to locally reorder filtered candidates before diversification and final trimming; reranking defaults to `none`. Add `--query-planner heuristic` to expand one question into multiple deterministic retrieval queries, or `--query-planner llm` to use the configured chat client for JSON query planning. Use `--max-subqueries` to cap planned queries and `--show-query-plan` to print them. Use `--include`, `--exclude`, and `--source-root` to restrict sources, `--json` for machine-readable chunks, `--show-retrieval-debug` for retrieval settings, and `--open-source N` to open a retrieved source in `FALKENGO_EDITOR`, `EDITOR`, or `VISUAL`.
 

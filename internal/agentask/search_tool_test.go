@@ -1,0 +1,339 @@
+package agentask
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/smasonuk/falken-core/pkg/falken"
+	"github.com/smasonuk/falken-vector/internal/config"
+	"github.com/smasonuk/falken-vector/internal/llm"
+	"github.com/smasonuk/falken-vector/internal/manifest"
+	"github.com/smasonuk/falken-vector/internal/rag"
+)
+
+func TestSearchIndexToolDescriptorName(t *testing.T) {
+	tool := NewSearchIndexTool(SearchToolOptions{})
+	if got := tool.Descriptor().Name; got != SearchIndexToolName {
+		t.Fatalf("tool name = %q, want %q", got, SearchIndexToolName)
+	}
+}
+
+func TestSearchIndexToolRejectsEmptyQuery(t *testing.T) {
+	tool := NewSearchIndexTool(SearchToolOptions{})
+	result := executeSearchTool(t, tool, `{"query":"   "}`)
+	if result.Success || result.Status != "invalid_arguments" {
+		t.Fatalf("result = %+v, want invalid arguments failure", result)
+	}
+}
+
+func TestSearchIndexToolRejectsInvalidRetrievalMode(t *testing.T) {
+	tool := NewSearchIndexTool(SearchToolOptions{})
+	result := executeSearchTool(t, tool, `{"query":"hello","retrieval":"bogus"}`)
+	if result.Success || result.Status != "invalid_retrieval" {
+		t.Fatalf("result = %+v, want invalid retrieval failure", result)
+	}
+}
+
+func TestSearchIndexToolLexicalDoesNotConstructEmbedder(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	calledEmbedder := false
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 4,
+		},
+		EmbedderFactory: func() (llm.Embedder, error) {
+			calledEmbedder = true
+			return fakeAgentAskEmbedder{}, nil
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			if opts.Mode != rag.RetrievalModeLexical {
+				t.Fatalf("mode = %q, want lexical", opts.Mode)
+			}
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if calledEmbedder {
+		t.Fatal("embedder factory was called for lexical retrieval")
+	}
+}
+
+func TestSearchIndexToolVectorConstructsEmbedder(t *testing.T) {
+	paths := searchToolTestPaths(t, true)
+	calledEmbedder := false
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeVector,
+			TopK: 4,
+		},
+		EmbedderFactory: func() (llm.Embedder, error) {
+			calledEmbedder = true
+			return fakeAgentAskEmbedder{}, nil
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			if opts.Embedder == nil {
+				t.Fatal("embedder was not assigned")
+			}
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if !calledEmbedder {
+		t.Fatal("embedder factory was not called for vector retrieval")
+	}
+}
+
+func TestSearchIndexToolTopKDefaultsToRetrievalDefault(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	var seenTopK int
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 5,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			seenTopK = opts.TopK
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if seenTopK != 5 {
+		t.Fatalf("topK = %d, want 5", seenTopK)
+	}
+}
+
+func TestSearchIndexToolTopKIsCapped(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	var seenTopK int
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 5,
+		},
+		MaxTopK: 7,
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			seenTopK = opts.TopK
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello","top_k":99}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if seenTopK != 7 {
+		t.Fatalf("topK = %d, want capped 7", seenTopK)
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	if len(payload.Warnings) != 1 || !strings.Contains(payload.Warnings[0], "capped") {
+		t.Fatalf("warnings = %+v, want cap warning", payload.Warnings)
+	}
+	if !strings.Contains(result.Content, "Warnings:") || !strings.Contains(result.Content, "top_k capped at 7") {
+		t.Fatalf("content = %q, want cap warning visible to model", result.Content)
+	}
+}
+
+func TestSearchIndexToolInvalidArgumentsDoNotConsumeSearchBudget(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:          paths,
+		Store:          manifest.EmptyStore{},
+		MaxSearchCalls: 1,
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}}, nil
+		},
+	})
+	invalid := executeSearchTool(t, tool, `{"query":"hello","unexpected":true}`)
+	if invalid.Success || invalid.Status != "invalid_arguments" {
+		t.Fatalf("invalid result = %+v, want invalid arguments", invalid)
+	}
+	valid := executeSearchTool(t, tool, `{"query":"hello"}`)
+	if !valid.Success {
+		t.Fatalf("valid result = %+v, want invalid call not to consume budget", valid)
+	}
+	limited := executeSearchTool(t, tool, `{"query":"hello again"}`)
+	if limited.Success || limited.Status != "search_call_limit" {
+		t.Fatalf("limited result = %+v, want search call limit after one valid search", limited)
+	}
+}
+
+func TestSearchIndexToolRegistersRetrievedChunks(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	registry := NewCitationRegistry()
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:    paths,
+		Store:    manifest.EmptyStore{},
+		Registry: registry,
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{testRetrievedChunk("chunk-1", "README.md", "raw text", "indexed text")},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if len(registry.Sources()) != 1 || registry.Sources()[0].SourceNumber != 1 {
+		t.Fatalf("sources = %+v, want source 1", registry.Sources())
+	}
+	if !strings.Contains(result.Content, "[source 1] README.md:10-12") {
+		t.Fatalf("content = %q, want source reference", result.Content)
+	}
+}
+
+func TestSearchIndexToolDuplicateAcrossSearchesKeepsSourceNumber(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	registry := NewCitationRegistry()
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:    paths,
+		Store:    manifest.EmptyStore{},
+		Registry: registry,
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{testRetrievedChunk("chunk-1", "README.md", "raw text", "indexed text")},
+			}, nil
+		},
+	})
+	first := executeSearchTool(t, tool, `{"query":"hello"}`)
+	second := executeSearchTool(t, tool, `{"query":"hello again"}`)
+	if !first.Success || !second.Success {
+		t.Fatalf("results = %+v %+v, want success", first, second)
+	}
+	if registry.SourceCount() != 1 {
+		t.Fatalf("source count = %d, want duplicate kept at 1", registry.SourceCount())
+	}
+	if !strings.Contains(second.Content, "[source 1]") {
+		t.Fatalf("second content = %q, want reused source 1", second.Content)
+	}
+}
+
+func TestSearchIndexToolContentUsesChunkTextNotIndexedText(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{testRetrievedChunk("chunk-1", "README.md", "raw chunk text", "Document: hidden")},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello"}`)
+	if !strings.Contains(result.Content, "raw chunk text") {
+		t.Fatalf("content = %q, want raw chunk text", result.Content)
+	}
+	if strings.Contains(result.Content, "Document: hidden") || strings.Contains(string(result.Payload), "Document: hidden") {
+		t.Fatalf("tool output leaked IndexedText: content=%q payload=%s", result.Content, string(result.Payload))
+	}
+}
+
+func TestSearchIndexToolPayloadIsValidJSON(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{testRetrievedChunk("chunk-1", "README.md", "raw chunk text", "indexed text")},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"hello"}`)
+	if !json.Valid(result.Payload) {
+		t.Fatalf("payload is invalid JSON: %s", string(result.Payload))
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	if !payload.Success || len(payload.Sources) != 1 || payload.Sources[0].Text != "raw chunk text" {
+		t.Fatalf("payload = %+v, want source payload", payload)
+	}
+}
+
+func executeSearchTool(t *testing.T, tool falken.Tool, args string) falken.ToolExecutionResult {
+	t.Helper()
+	result, err := tool.Execute(context.Background(), falken.ToolInvocation{
+		CallID:    "call-1",
+		Name:      SearchIndexToolName,
+		Arguments: json.RawMessage(args),
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	return result
+}
+
+func searchToolTestPaths(t *testing.T, withVector bool) config.Paths {
+	t.Helper()
+	state := filepath.Join(t.TempDir(), ".falkengo")
+	paths, err := config.ResolvePaths(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ManifestPath, []byte("manifest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if withVector {
+		if err := os.MkdirAll(paths.VecgoPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return paths
+}
+
+func decodeSearchPayload(t *testing.T, raw json.RawMessage) searchToolPayload {
+	t.Helper()
+	var payload searchToolPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode payload: %v\n%s", err, string(raw))
+	}
+	return payload
+}
+
+type fakeAgentAskEmbedder struct{}
+
+func (fakeAgentAskEmbedder) EmbedText(context.Context, string) (llm.Embedding, error) {
+	return llm.Embedding{Model: "fake", Vector: []float32{1, 0}}, nil
+}

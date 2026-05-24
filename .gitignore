@@ -1,0 +1,4 @@
+/.falkengo/
+/bin/
+/falkengo
+cmd/embed-hello/vecgo-data/

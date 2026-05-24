@@ -1,0 +1,3 @@
+{"id":"retrieve-command","question":"How does the query command retrieve chunks?","expected_path_suffixes":["internal/cli/query.go"]}
+{"id":"retrieve-function","question":"Where does vector search happen?","expected_path_suffixes":["internal/rag/retrieve.go"]}
+{"id":"manifest-chunk-model","question":"What fields are stored for a chunk?","expected_path_suffixes":["internal/manifest/models.go"]}

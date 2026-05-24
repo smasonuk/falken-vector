@@ -103,6 +103,27 @@ func TestSuggestFollowupQueriesRejectsNumericOCRNoise(t *testing.T) {
 	}
 }
 
+func TestSuggestFollowupQueriesRejectsMetadataTranscriptFragment(t *testing.T) {
+	queries := SuggestFollowupQueries("protein folding", []rag.SourceChunk{{
+		Path: "alphafold/meetings/sdb.md",
+		Text: `We haven't got any metadata what was used to run that.
+PDB and error JSON are available for the folded structures.`,
+	}}, 3)
+
+	got := strings.ToLower(strings.Join(queries, "\n"))
+	if strings.Contains(got, "got any metadata what was used run") ||
+		strings.Contains(got, "got any metadata") ||
+		strings.Contains(got, "what was used") {
+		t.Fatalf("queries = %+v, leaked transcript-style metadata fragment", queries)
+	}
+	if !strings.Contains(got, "metadata") {
+		t.Fatalf("queries = %+v, want metadata preserved", queries)
+	}
+	if !strings.Contains(got, "pdb") || !strings.Contains(got, "json") {
+		t.Fatalf("queries = %+v, want technical terms preserved", queries)
+	}
+}
+
 func TestCleanExpansionGroupKeepsKnownTermsAndDropsOCRNoise(t *testing.T) {
 	cleaned := cleanExpansionGroup([]string{"DVI", "000", "150", "PDB", "MMseqs"})
 	got := strings.Join(cleaned, " ")
@@ -115,6 +136,46 @@ func TestCleanExpansionGroupKeepsKnownTermsAndDropsOCRNoise(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cleaned = %+v, want %q", cleaned, want)
 		}
+	}
+}
+
+func TestCleanBroadExpansionGroupDropsTranscriptFillerAroundMetadata(t *testing.T) {
+	cleaned := cleanBroadExpansionGroup([]string{"got any metadata what was used run"})
+	got := strings.Join(cleaned, " ")
+	if got != "metadata" {
+		t.Fatalf("cleaned = %+v, want only metadata", cleaned)
+	}
+}
+
+func TestTooSimilarExpansionQueryRejectsTokenReorder(t *testing.T) {
+	existing := []string{"AlphaFold A3M PDB JSON NCBI"}
+	if !tooSimilarExpansionQuery("AlphaFold NCBI A3M JSON", existing, 0.75) {
+		t.Fatal("tooSimilarExpansionQuery = false, want reordered near duplicate rejected")
+	}
+	if tooSimilarExpansionQuery("AlphaFold metadata method version", existing, 0.75) {
+		t.Fatal("metadata query was treated as too similar to artifact query")
+	}
+}
+
+func TestSelectExpansionQueriesPrefersDiverseCleanGroups(t *testing.T) {
+	queries := selectExpansionQueries([]expansionQueryCandidate{
+		{Query: "AlphaFold A3M PDB JSON NCBI", Category: CategoryArtifact},
+		{Query: "AlphaFold NCBI A3M JSON", Category: CategoryArtifact},
+		{Query: "AlphaFold metadata method version", Category: CategoryMetadata},
+		{Query: "AlphaFold monomer dimer ligand", Category: CategoryModality},
+	}, 3)
+	got := strings.Join(queries, "\n")
+	for _, want := range []string{
+		"AlphaFold A3M PDB JSON NCBI",
+		"AlphaFold metadata method version",
+		"AlphaFold monomer dimer ligand",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("queries = %+v, want %q", queries, want)
+		}
+	}
+	if strings.Contains(got, "AlphaFold NCBI A3M JSON") {
+		t.Fatalf("queries = %+v, near-duplicate artifact query should not fill budget", queries)
 	}
 }
 

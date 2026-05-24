@@ -46,20 +46,32 @@ func suggestFollowupQueries(question string, sources []rag.SourceChunk, limit in
 		return nil
 	}
 	topic := compactQueryTopic(question)
+	if purpose == SuggestionPurposeBroadExpansion {
+		candidates := make([]expansionQueryCandidate, 0, len(groups))
+		for _, group := range groups {
+			group = cleanBroadExpansionGroup(group)
+			query := normalizeSearchQuery(joinUnique(append([]string{topic}, group...)))
+			if query == "" || !materiallyDifferentQuery(query, question) {
+				continue
+			}
+			if !usefulExpansionGroup(group) || !usefulExpansionQuery(query, question) {
+				continue
+			}
+			candidates = append(candidates, expansionQueryCandidate{
+				Query:    query,
+				Category: expansionCategoryForGroup(group),
+			})
+		}
+		return selectExpansionQueries(candidates, limit)
+	}
+
 	queries := make([]string, 0, limit)
 	for _, group := range groups {
-		if purpose == SuggestionPurposeBroadExpansion {
-			group = cleanExpansionGroup(group)
-		}
 		query := normalizeSearchQuery(joinUnique(append([]string{topic}, group...)))
 		if query == "" || !materiallyDifferentQuery(query, question) {
 			continue
 		}
 		switch purpose {
-		case SuggestionPurposeBroadExpansion:
-			if !usefulExpansionGroup(group) || !usefulExpansionQuery(query, question) {
-				continue
-			}
 		case SuggestionPurposeAgentHint:
 			if !usefulHintGroup(group) || !usefulHintQuery(query, question) {
 				continue
@@ -71,6 +83,44 @@ func suggestFollowupQueries(question string, sources []rag.SourceChunk, limit in
 		}
 	}
 	return queries
+}
+
+type expansionQueryCandidate struct {
+	Query    string
+	Category ExpansionCategory
+}
+
+func selectExpansionQueries(candidates []expansionQueryCandidate, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	selected := make([]string, 0, limit)
+	usedCategories := map[ExpansionCategory]struct{}{}
+	deferred := make([]expansionQueryCandidate, 0)
+	for _, candidate := range candidates {
+		if _, ok := usedCategories[candidate.Category]; ok && candidate.Category != CategoryUnknown {
+			deferred = append(deferred, candidate)
+			continue
+		}
+		if tooSimilarExpansionQuery(candidate.Query, selected, 0.75) {
+			continue
+		}
+		selected = append(selected, candidate.Query)
+		usedCategories[candidate.Category] = struct{}{}
+		if len(selected) >= limit {
+			return selected
+		}
+	}
+	for _, candidate := range deferred {
+		if tooSimilarExpansionQuery(candidate.Query, selected, 0.75) {
+			continue
+		}
+		selected = append(selected, candidate.Query)
+		if len(selected) >= limit {
+			break
+		}
+	}
+	return selected
 }
 
 func suggestedTerms(question string, sources []rag.SourceChunk, limit int) []string {
@@ -262,6 +312,10 @@ func usefulExpansionGroup(group []string) bool {
 }
 
 func cleanExpansionGroup(group []string) []string {
+	return cleanBroadExpansionGroup(group)
+}
+
+func cleanBroadExpansionGroup(group []string) []string {
 	out := make([]string, 0, len(group))
 	for _, term := range group {
 		term = strings.Trim(term, " \t\r\n.,:;()[]{}")
@@ -293,13 +347,13 @@ func usefulExpansionTerm(term string) bool {
 	if term == "" {
 		return false
 	}
-	if isKnownTechnicalToken(term) {
+	if isKnownTechnicalToken(term) || isKnownUsefulExpansionWord(term) {
 		return true
 	}
 	if isNumericNoiseToken(term) || isUnknownAllCapsNoise(term) {
 		return false
 	}
-	return usefulSuggestionTerm(term, "")
+	return false
 }
 
 func isKnownTechnicalToken(token string) bool {
@@ -314,6 +368,14 @@ func isKnownTechnicalToken(token string) bool {
 		if normalized == phrase {
 			return true
 		}
+	}
+	return false
+}
+
+func isKnownUsefulExpansionWord(token string) bool {
+	normalized := strings.ToLower(strings.Trim(token, " \t\r\n.,:;()[]{}"))
+	if _, ok := usefulExpansionWords[normalized]; ok {
+		return true
 	}
 	return false
 }
@@ -357,6 +419,51 @@ func isUnknownAllCapsNoise(token string) bool {
 		return false
 	}
 	return hasLetter && len(token) >= 2
+}
+
+func tooSimilarExpansionQuery(candidate string, existing []string, threshold float64) bool {
+	if threshold <= 0 {
+		threshold = 0.75
+	}
+	candidateTokens := expansionQueryTokenSet(candidate)
+	if len(candidateTokens) == 0 {
+		return false
+	}
+	for _, query := range existing {
+		if tokenJaccardSimilarity(candidateTokens, expansionQueryTokenSet(query)) >= threshold {
+			return true
+		}
+	}
+	return false
+}
+
+func expansionQueryTokenSet(query string) map[string]struct{} {
+	tokens := normalizedQueryTokens(query)
+	out := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		out[token] = struct{}{}
+	}
+	return out
+}
+
+func tokenJaccardSimilarity(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	intersection := 0
+	for token := range a {
+		if _, ok := b[token]; ok {
+			intersection++
+		}
+	}
+	union := len(a) + len(b) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
 }
 
 func usefulExpansionQuery(query string, originalQuestion string) bool {
@@ -407,6 +514,56 @@ func usefulHintQuery(query string, originalQuestion string) bool {
 		return false
 	}
 	return true
+}
+
+type ExpansionCategory string
+
+const (
+	CategoryUnknown  ExpansionCategory = ""
+	CategoryArtifact ExpansionCategory = "artifact"
+	CategoryMetadata ExpansionCategory = "metadata"
+	CategorySpecies  ExpansionCategory = "species"
+	CategoryModality ExpansionCategory = "modality"
+	CategoryPipeline ExpansionCategory = "pipeline"
+)
+
+func expansionCategoryForGroup(group []string) ExpansionCategory {
+	counts := map[ExpansionCategory]int{}
+	for _, term := range group {
+		for _, token := range normalizedQueryTokens(term) {
+			category := expansionCategoryForToken(token)
+			if category == CategoryUnknown {
+				continue
+			}
+			counts[category]++
+		}
+	}
+	best := CategoryUnknown
+	bestCount := 0
+	for _, category := range []ExpansionCategory{CategoryArtifact, CategoryMetadata, CategorySpecies, CategoryModality, CategoryPipeline} {
+		if counts[category] > bestCount {
+			best = category
+			bestCount = counts[category]
+		}
+	}
+	return best
+}
+
+func expansionCategoryForToken(token string) ExpansionCategory {
+	switch strings.ToLower(token) {
+	case "a3m", "fasta", "pdb", "json":
+		return CategoryArtifact
+	case "metadata", "method", "methods", "version", "versions", "structure", "structures":
+		return CategoryMetadata
+	case "alignment", "alignments", "mmseqs", "ncbi", "sequence", "sequences", "species", "uniprot":
+		return CategorySpecies
+	case "dimer", "ligand", "monomer":
+		return CategoryModality
+	case "pipeline", "workflow":
+		return CategoryPipeline
+	default:
+		return CategoryUnknown
+	}
 }
 
 func normalizedQueryTokens(query string) []string {
@@ -564,11 +721,43 @@ var highSignalExpansionTokens = map[string]struct{}{
 	"workflow":  {},
 }
 
+var usefulExpansionWords = map[string]struct{}{
+	"a3m":        {},
+	"alignment":  {},
+	"alignments": {},
+	"alphafold":  {},
+	"dimer":      {},
+	"fasta":      {},
+	"json":       {},
+	"ligand":     {},
+	"metadata":   {},
+	"method":     {},
+	"methods":    {},
+	"mmseqs":     {},
+	"monomer":    {},
+	"ncbi":       {},
+	"pdb":        {},
+	"pipeline":   {},
+	"protein":    {},
+	"proteins":   {},
+	"sequence":   {},
+	"sequences":  {},
+	"species":    {},
+	"structure":  {},
+	"structures": {},
+	"uniprot":    {},
+	"version":    {},
+	"versions":   {},
+	"workflow":   {},
+}
+
 var transcriptNoiseFragments = []string{
 	"for example",
 	"going to",
+	"got any",
 	"these two",
 	"probably about",
+	"what was",
 	"which are",
 	"which is",
 	"kind of",
@@ -582,6 +771,7 @@ var expansionSpeechStopWords = map[string]struct{}{
 	"again":    {},
 	"also":     {},
 	"and":      {},
+	"any":      {},
 	"are":      {},
 	"because":  {},
 	"been":     {},
@@ -590,18 +780,25 @@ var expansionSpeechStopWords = map[string]struct{}{
 	"example":  {},
 	"for":      {},
 	"from":     {},
+	"got":      {},
 	"going":    {},
 	"here":     {},
 	"into":     {},
 	"probably": {},
 	"really":   {},
+	"run":      {},
+	"say":      {},
 	"several":  {},
 	"that":     {},
 	"these":    {},
 	"this":     {},
 	"those":    {},
 	"two":      {},
+	"used":     {},
+	"was":      {},
+	"what":     {},
 	"which":    {},
 	"with":     {},
 	"would":    {},
+	"yeah":     {},
 }

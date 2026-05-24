@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/smasonuk/falken-core/pkg/falken"
@@ -147,7 +148,7 @@ func newAskCommand(opts *options) *cobra.Command {
 					printCoverageWarnings(cmd.ErrOrStderr(), result.CoverageWarnings)
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
-				printAnswerWithSourceMode(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode, showSourceProvenance)
+				printAnswerWithSourceMode(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode, showSourceProvenance, showAgentTools)
 				return nil
 			}
 			if err := prepareLexicalIndex(ctx, store, retrievalOpts.Mode); err != nil {
@@ -237,15 +238,15 @@ func printAnswer(w io.Writer, result rag.AskResult) {
 }
 
 func printAnswerWithSourcesMode(w io.Writer, result rag.AskResult, sourcesMode string) {
-	printAnswerWithSourceMode(w, result.Answer, result.Sources, sourcesMode, false)
+	printAnswerWithSourceMode(w, result.Answer, result.Sources, sourcesMode, false, false)
 }
 
-func printAnswerWithSourceMode(w io.Writer, answer string, sources []rag.SourceChunk, sourcesMode string, showProvenance bool) {
+func printAnswerWithSourceMode(w io.Writer, answer string, sources []rag.SourceChunk, sourcesMode string, showProvenance, showAuditProvenance bool) {
 	fmt.Fprintln(w, "Answer:")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, answer)
 	fmt.Fprintln(w)
-	printSourcesForMode(w, answer, sources, sourcesMode, showProvenance)
+	printSourcesForMode(w, answer, sources, sourcesMode, showProvenance, showAuditProvenance)
 }
 
 func printAnswerText(w io.Writer, answer string, sources []rag.SourceChunk) {
@@ -262,13 +263,13 @@ func printCitationWarnings(w io.Writer, warnings []string) {
 	}
 }
 
-func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, mode string, showProvenance bool) {
+func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, mode string, showProvenance, showAuditProvenance bool) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "cited":
 		printSourcesWithHeading(w, "Sources:", citedSourcesOnly(answer, sources))
 	case "all":
 		printAllSourcesWithCitationMarkers(w, answer, sources, showProvenance)
-		printSourceAudit(w, answer, sources)
+		printSourceAudit(w, answer, sources, showAuditProvenance)
 	case "both":
 		cited := citedSourcesOnly(answer, sources)
 		if len(cited) != 0 {
@@ -277,7 +278,7 @@ func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, 
 			fmt.Fprintln(w, "No cited sources.")
 		}
 		printOtherSourcesWithCoverage(w, answer, sources, showProvenance)
-		printSourceAudit(w, answer, sources)
+		printSourceAudit(w, answer, sources, showAuditProvenance)
 	}
 }
 
@@ -359,7 +360,7 @@ func printSourceProvenance(w io.Writer, source rag.SourceChunk, showProvenance b
 	fmt.Fprintln(w, line)
 }
 
-func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk) {
+func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk, showProvenanceSummary bool) {
 	if len(sources) == 0 {
 		return
 	}
@@ -374,6 +375,40 @@ func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk) {
 	fmt.Fprintf(w, "- available to agent: %d\n", len(sources))
 	fmt.Fprintf(w, "- cited in answer: %d\n", citedAvailable)
 	fmt.Fprintf(w, "- uncited: %d\n", len(sources)-citedAvailable)
+	if showProvenanceSummary {
+		printSourceAuditProvenanceSummary(w, sources)
+	}
+}
+
+func printSourceAuditProvenanceSummary(w io.Writer, sources []rag.SourceChunk) {
+	counts := map[string]int{}
+	for _, source := range sources {
+		if source.Provenance == nil || strings.TrimSpace(source.Provenance.Query) == "" {
+			continue
+		}
+		counts[source.Provenance.Query]++
+	}
+	if len(counts) == 0 {
+		return
+	}
+	type queryCount struct {
+		Query string
+		Count int
+	}
+	sorted := make([]queryCount, 0, len(counts))
+	for query, count := range counts {
+		sorted = append(sorted, queryCount{Query: query, Count: count})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Count == sorted[j].Count {
+			return sorted[i].Query < sorted[j].Query
+		}
+		return sorted[i].Count > sorted[j].Count
+	})
+	fmt.Fprintln(w, "- introduced by query:")
+	for _, item := range sorted {
+		fmt.Fprintf(w, "  - %s: %d\n", item.Query, item.Count)
+	}
 }
 
 func citedSourcesOnly(answer string, sources []rag.SourceChunk) []rag.SourceChunk {

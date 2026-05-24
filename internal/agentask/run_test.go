@@ -604,6 +604,83 @@ func TestRunThinSourceNudgeExpandsShortCitedSource(t *testing.T) {
 	if len(llm.requests) < 3 || !strings.Contains(lastUserPrompt(llm.requests[2]), "very short source spans") {
 		t.Fatalf("thin nudge prompt missing in requests = %+v", llm.requests)
 	}
+	prompt := lastUserPrompt(llm.requests[2])
+	for _, want := range []string{
+		"Previous answer:",
+		"not restarting",
+		"Preserve relevant points",
+		"AlphaFold is mentioned in the notes [source 1].",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("thin nudge prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestRunThinSourceNudgePromptPreservesSupportedSections(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	sourcePath := filepath.Join(t.TempDir(), "alphafold.md")
+	if err := os.WriteFile(sourcePath, []byte("one\ntwo\nAlphaFold thin line\nfour\nfive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previousAnswer := "Storage/artifacts: AlphaFold produces PDB files [source 1].\n\nDB lookup: check the structure DB first, then fold if needed [source 1]."
+	finalAnswer := previousAnswer + "\n\nExpanded context confirms the workflow [source 1]."
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold","strategy":"focused"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: previousAnswer, FinishReason: falken.FinishReasonStop},
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-read",
+				Name:      ReadIndexSourceToolName,
+				Arguments: json.RawMessage(`{"source_number":1,"context_lines":20}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: finalAnswer, FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize anything related to AlphaFold folding"
+	opts.EnableReadSourceTool = true
+	opts.CoverageNudge = boolPtr(false)
+	opts.RetrieveWithPlan = func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+		chunk := testRetrievedChunk("alphafold-thin", sourcePath, "AlphaFold thin line", "indexed")
+		chunk.Chunk.StartLine = 3
+		chunk.Chunk.EndLine = 3
+		return rag.RetrieveResult{
+			Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+			Chunks: []rag.RetrievedChunk{chunk},
+		}, nil
+	}
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Answer != finalAnswer {
+		t.Fatalf("answer = %q, want post-nudge answer", result.Answer)
+	}
+	if !result.ThinSourceNudged {
+		t.Fatalf("ThinSourceNudged = false, want true")
+	}
+	prompt := lastUserPrompt(llm.requests[2])
+	for _, want := range []string{
+		"Previous answer:",
+		"Storage/artifacts:",
+		"DB lookup:",
+		"not restarting",
+		"Preserve relevant points",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("thin nudge prompt = %q, want %q", prompt, want)
+		}
+	}
 }
 
 func TestRunThinSourceNudgeSkippedWhenReadSourceDisabled(t *testing.T) {

@@ -209,17 +209,25 @@ func readSourceNumbers(trace AgentTrace) map[int]struct{} {
 	return out
 }
 
-func thinSourceNudgePrompt(sourceNumbers []int, contextLines int) string {
+func thinSourceNudgePrompt(question, previousAnswer string, sourceNumbers []int, contextLines int) string {
 	sourceRefs := make([]string, 0, len(sourceNumbers))
 	for _, number := range sourceNumbers {
 		sourceRefs = append(sourceRefs, fmt.Sprintf("[source %d]", number))
 	}
 	return fmt.Sprintf(`Your answer cites some very short source spans. Before finalizing this broad summary, read nearby context for the most important thin sources.
 
+You are expanding source context, not restarting the answer.
+
+The user's question:
+%s
+
+Previous answer:
+%s
+
 Call read_index_source for these source numbers:
 %s
 
-Use around %d context lines. Then revise the answer if the expanded context changes or improves it. If the answer is already supported, keep it concise and cite the same source numbers.`, strings.Join(sourceRefs, ", "), contextLines)
+Use around %d context lines. Then revise only where the expanded context improves accuracy, support, or detail. Preserve relevant points from the previous answer if they remain supported by cited or available sources. Do not drop useful supported sections merely because they were not part of the newly expanded sources. If the answer is already supported, keep it concise and cite the same source numbers.`, question, previousAnswer, strings.Join(sourceRefs, ", "), contextLines)
 }
 
 func thinSourceNudgeWarning(sourceNumbers []int) string {

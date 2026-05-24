@@ -173,7 +173,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			}
 			result.ThinSourceWarnings = append(result.ThinSourceWarnings, thinSourceNudgeWarning(thinDecision.SourceNumbers))
 			emitAgentNote(opts.Events, "agent "+thinSourceNudgeWarning(thinDecision.SourceNumbers))
-			retryAnswer, err := agent.Run(ctx, thinSourceNudgePrompt(thinDecision.SourceNumbers, thinDecision.ContextLines))
+			retryAnswer, err := agent.Run(ctx, thinSourceNudgePrompt(opts.Question, result.Answer, thinDecision.SourceNumbers, thinDecision.ContextLines))
 			if err != nil {
 				result.ThinSourceWarnings = append(result.ThinSourceWarnings, "thin-source nudge failed: "+err.Error())
 				result.CitationValid = true

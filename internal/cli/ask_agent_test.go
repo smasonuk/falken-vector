@@ -705,6 +705,67 @@ func TestAskAgentSourcesAllCanPrintSourceProvenance(t *testing.T) {
 	}
 }
 
+func TestAskAgentSourceAuditIncludesQueryCountsWhenShowingTools(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 2].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "one.md", StartLine: 1, EndLine: 2, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold"}},
+				{SourceNumber: 2, Path: "two.md", StartLine: 3, EndLine: 4, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold"}},
+				{SourceNumber: 3, Path: "three.md", StartLine: 5, EndLine: 6, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "protein folding"}},
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both", "--show-agent-tools"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"- introduced by query:",
+		"  - AlphaFold: 2",
+		"  - protein folding: 1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestAskAgentSourceAuditOmitsQueryCountsWithoutDebug(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 1].",
+			Sources: []rag.SourceChunk{{
+				SourceNumber: 1,
+				Path:         "one.md",
+				StartLine:    1,
+				EndLine:      2,
+				Provenance:   &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold"},
+			}},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.Contains(out.String(), "introduced by query") {
+		t.Fatalf("output = %q, want no provenance summary without --show-agent-tools", out.String())
+	}
+}
+
 func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
 	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {

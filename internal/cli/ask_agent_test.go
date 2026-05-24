@@ -50,6 +50,35 @@ func TestAskWithoutAgentUsesLegacyLLMPath(t *testing.T) {
 	}
 }
 
+func TestAskWithoutAgentDefaultsToCitedSources(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAskForCitationTest(t, func(opts rag.AskOptions) rag.AskResult {
+		return rag.AskResult{
+			Answer: "legacy answer [source 2].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "available.go", StartLine: 1, EndLine: 2},
+				{SourceNumber: 2, Path: "cited.go", StartLine: 3, EndLine: 4},
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--retrieval", "lexical"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, "Sources:\n[source 2] cited.go:3-4") {
+		t.Fatalf("output = %q, want cited source", output)
+	}
+	if strings.Contains(output, "available.go") || strings.Contains(output, "Sources available to the agent:") {
+		t.Fatalf("output = %q, want non-agent default to stay cited", output)
+	}
+}
+
 func TestAskAgentCallsRunnerWithoutPreRetrieval(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
 	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
@@ -194,7 +223,20 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 				"query": "hello",
 				"top_k": 8,
 				"query_plan": {"queries": ["hello", "hello source"]},
-				"sources": [{"text": "hidden source text"}]
+				"sources": [{"text": "hidden source text"}],
+				"warnings": ["top_k raised to configured floor 12"]
+			}`),
+		}})
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-2",
+			Name:   "search_index",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"status": "ok",
+				"query": "hello again",
+				"top_k": 8,
+				"sources": [],
+				"warnings": ["top_k raised to configured floor 12", "different warning"]
 			}`),
 		}})
 		return agentask.Result{
@@ -232,6 +274,12 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 	if strings.Count(stderr, "agent tool call: search_index") != 1 {
 		t.Fatalf("stderr = %q, want one live tool call line", stderr)
 	}
+	if strings.Count(stderr, "top_k raised to configured floor 12") != 1 {
+		t.Fatalf("stderr = %q, want duplicate warning suppressed", stderr)
+	}
+	if !strings.Contains(stderr, "different warning") {
+		t.Fatalf("stderr = %q, want distinct warning printed", stderr)
+	}
 }
 
 func TestAskAgentPassesCoverageAndReadSourceFlags(t *testing.T) {
@@ -257,6 +305,56 @@ func TestAskAgentPassesCoverageAndReadSourceFlags(t *testing.T) {
 	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-coverage-nudge", "--min-agent-searches", "3", "--max-agent-coverage-retries", "2", "--agent-read-source-tool"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentAutoEnablesReadSourceForBroadQuestion(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if !opts.EnableReadSourceTool {
+			t.Fatal("EnableReadSourceTool = false, want broad question auto-enable")
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "summarize anything related to AlphaFold folding", "--agent", "--retrieval", "lexical"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentNoReadSourceFlagDisablesAutoReadSource(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.EnableReadSourceTool {
+			t.Fatal("EnableReadSourceTool = true, want explicit no flag to disable")
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "summarize anything related to AlphaFold folding", "--agent", "--retrieval", "lexical", "--no-agent-read-source-tool"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentReadSourceFlagsConflict(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		t.Fatal("runAgentAsk should not be called when read-source flags conflict")
+		return agentask.Result{}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-read-source-tool", "--no-agent-read-source-tool"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
+		t.Fatalf("Execute error = %v, want read-source flag conflict", err)
 	}
 }
 
@@ -310,12 +408,55 @@ func TestAskAgentResultWithSourcePrintsReference(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if !strings.Contains(out.String(), "Sources:\n[source 1] internal/rag/retrieve.go:35-73") {
-		t.Fatalf("output = %q, want source reference", out.String())
+	output := out.String()
+	for _, want := range []string{
+		"Sources cited:",
+		"[source 1] internal/rag/retrieve.go:35-73",
+		"Sources available to the agent:",
+		"[source 1] internal/rag/retrieve.go:35-73  (cited)",
+		"Source audit:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
 	}
 }
 
-func TestAskAgentPrintsOnlyCitedSourcesByDefault(t *testing.T) {
+func TestAskAgentDefaultsToBothSourceMode(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 2].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "available.go", StartLine: 1, EndLine: 2},
+				{SourceNumber: 2, Path: "cited.go", StartLine: 3, EndLine: 4},
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"Sources cited:",
+		"[source 2] cited.go:3-4",
+		"Sources available to the agent:",
+		"[source 1] available.go:1-2",
+		"[source 2] cited.go:3-4  (cited)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestAskAgentSourcesCitedPrintsOnlyCitedSources(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
 	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
 		return agentask.Result{
@@ -331,16 +472,54 @@ func TestAskAgentPrintsOnlyCitedSourcesByDefault(t *testing.T) {
 	cmd := NewRootCommand()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical"})
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "cited"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	output := out.String()
 	if !strings.Contains(output, "[source 2] cited.go:3-4") {
-		t.Fatalf("output = %q, want cited source", output)
+		t.Fatalf("output = %q, want source reference", out.String())
 	}
-	if strings.Contains(output, "uncited.go") {
-		t.Fatalf("output = %q, want uncited source hidden by default", output)
+	if strings.Contains(output, "uncited.go") || strings.Contains(output, "Source audit:") {
+		t.Fatalf("output = %q, want only cited source", output)
+	}
+}
+
+func TestAskAgentSourcesBothPrintsCitedAndAllSources(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 2].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "available.go", StartLine: 1, EndLine: 2},
+				{SourceNumber: 2, Path: "cited.go", StartLine: 3, EndLine: 4},
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"Sources cited:",
+		"[source 2] cited.go:3-4",
+		"Sources available to the agent:",
+		"[source 1] available.go:1-2",
+		"[source 2] cited.go:3-4  (cited)",
+		"Source audit:",
+		"- available to agent: 2",
+		"- cited in answer: 1",
+		"- uncited: 1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
 	}
 }
 
@@ -365,8 +544,31 @@ func TestAskAgentSourcesAllPrintsRetrievedSources(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	output := out.String()
-	if !strings.Contains(output, "uncited.go") || !strings.Contains(output, "cited.go") {
-		t.Fatalf("output = %q, want all sources", output)
+	for _, want := range []string{
+		"Sources available to the agent:",
+		"[source 1] uncited.go:1-2",
+		"[source 2] cited.go:3-4  (cited)",
+		"Source audit:",
+		"- available to agent: 2",
+		"- cited in answer: 1",
+		"- uncited: 1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+	if strings.Contains(output, "Sources cited:") {
+		t.Fatalf("output = %q, did not want cited section for --sources all", output)
+	}
+}
+
+func TestAskSourcesModeRejectsInvalidValue(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--retrieval", "lexical", "--sources", "nearby"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--sources must be cited, all, or both") {
+		t.Fatalf("Execute error = %v, want invalid sources mode", err)
 	}
 }
 

@@ -142,7 +142,12 @@ type AskRequest struct {
 type Answer struct {
 	Text string
 
+	// Sources contains all sources made available to the answer path.
 	Sources []Source
+	// CitedSources contains the subset of Sources cited by Text.
+	CitedSources []Source
+	// AvailableSources mirrors Sources for callers that want explicit naming.
+	AvailableSources []Source
 
 	CitationWarnings []string
 	CitationValid    bool

@@ -175,6 +175,10 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 			result = mergeBroadSearchResultsForQuery(query, results, retrieveOpts.TopK)
 		}
 	}
+	suggestedQueries := []string{}
+	if strategy == "focused" && len(result.Chunks) != 0 {
+		suggestedQueries = SuggestFollowupQueries(query, sourceChunksFromRetrieved(result.Chunks), 3)
+	}
 
 	sources := make([]searchSourcePayload, 0, len(result.Chunks))
 	beforeSourceCount := s.opts.Registry.SourceCount()
@@ -215,6 +219,7 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 		SeedQueryPlan:    queryPlanPayload(seedPlan),
 		InternalPlans:    internalPlans,
 		ExpansionQueries: expansionQueries,
+		SuggestedQueries: suggestedQueries,
 		NewSources:       newSources,
 		DuplicateSources: len(sources) - newSources,
 		UniqueDocuments:  len(documentIDs),
@@ -222,7 +227,7 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 		Sources:          sources,
 		Warnings:         warnings,
 	}
-	return successfulSearchToolResult(renderSearchToolContent(query, strategy, seedPlan, expansionQueries, sources, warnings), payload), nil
+	return successfulSearchToolResult(renderSearchToolContent(query, strategy, seedPlan, expansionQueries, suggestedQueries, sources, warnings, payload.NewSources, payload.DuplicateSources), payload), nil
 }
 
 func decodeSearchIndexArgs(raw json.RawMessage) (searchIndexArgs, error) {
@@ -435,7 +440,7 @@ func queryPlanPayload(plan rag.QueryPlan) searchQueryPlanPayload {
 	}
 }
 
-func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, expansionQueries []string, sources []searchSourcePayload, warnings []string) string {
+func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, expansionQueries []string, suggestedQueries []string, sources []searchSourcePayload, warnings []string, newSources int, duplicateSources int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Found %d source chunks for query: %s\n", len(sources), query)
 	if strategy != "" && strategy != "focused" {
@@ -452,6 +457,15 @@ func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, 
 		for i, expansionQuery := range expansionQueries {
 			fmt.Fprintf(&b, "%d. %s\n", i+1, expansionQuery)
 		}
+	}
+	if len(suggestedQueries) != 0 {
+		b.WriteString("\nSuggested follow-up queries:\n")
+		for i, suggestedQuery := range suggestedQueries {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, suggestedQuery)
+		}
+	}
+	if newSources == 0 && duplicateSources > 0 {
+		b.WriteString("\nThis search added no new sources; consider answering instead of searching again unless another materially different query is needed.\n")
 	}
 	if len(plan.Queries) != 0 {
 		b.WriteString("\nQuery plan:\n")
@@ -518,6 +532,7 @@ type searchToolPayload struct {
 	SeedQueryPlan    searchQueryPlanPayload   `json:"seed_query_plan,omitempty"`
 	InternalPlans    []searchQueryPlanPayload `json:"internal_query_plans,omitempty"`
 	ExpansionQueries []string                 `json:"expansion_queries,omitempty"`
+	SuggestedQueries []string                 `json:"suggested_queries,omitempty"`
 	NewSources       int                      `json:"new_sources,omitempty"`
 	DuplicateSources int                      `json:"duplicate_sources,omitempty"`
 	UniqueDocuments  int                      `json:"unique_documents,omitempty"`

@@ -68,6 +68,10 @@ func isBroadCoverageQuestion(question string) bool {
 	return false
 }
 
+func IsBroadQuestion(question string) bool {
+	return isBroadCoverageQuestion(question)
+}
+
 func searchStats(trace AgentTrace) coverageSearchStats {
 	stats := coverageSearchStats{}
 	for _, call := range trace.ToolCalls {

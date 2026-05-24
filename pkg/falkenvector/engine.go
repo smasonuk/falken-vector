@@ -781,9 +781,13 @@ func retrievalEvent(opts rag.RetrieveOptions, result *rag.RetrieveResult, config
 }
 
 func answerFromRAG(result rag.AskResult) Answer {
+	available := publicSources(result.Sources)
+	cited := publicSources(citedSourceChunks(result.Answer, result.Sources))
 	return Answer{
 		Text:             result.Answer,
-		Sources:          publicSources(result.Sources),
+		Sources:          available,
+		CitedSources:     cited,
+		AvailableSources: available,
 		CitationWarnings: append([]string(nil), result.CitationWarnings...),
 		CitationValid:    result.CitationValid,
 		Retried:          result.Retried,
@@ -795,9 +799,13 @@ func answerFromAgent(result agentask.Result) Answer {
 	for _, name := range result.ToolCalls {
 		calls = append(calls, ToolCallSummary{Name: name})
 	}
+	available := publicSources(result.Sources)
+	cited := publicSources(citedSourceChunks(result.Answer, result.Sources))
 	return Answer{
 		Text:             result.Answer,
-		Sources:          publicSources(result.Sources),
+		Sources:          available,
+		CitedSources:     cited,
+		AvailableSources: available,
 		CitationWarnings: append([]string(nil), result.CitationWarnings...),
 		CitationValid:    result.CitationValid,
 		CoverageWarnings: append([]string(nil), result.CoverageWarnings...),
@@ -816,6 +824,24 @@ func publicSources(sources []rag.SourceChunk) []Source {
 			StartLine: source.StartLine,
 			EndLine:   source.EndLine,
 		})
+	}
+	return out
+}
+
+func citedSourceChunks(answer string, sources []rag.SourceChunk) []rag.SourceChunk {
+	cited := rag.ExtractCitedSourceNumbers(answer)
+	if len(cited) == 0 {
+		return nil
+	}
+	keep := make(map[int]struct{}, len(cited))
+	for _, number := range cited {
+		keep[number] = struct{}{}
+	}
+	out := make([]rag.SourceChunk, 0, len(cited))
+	for _, source := range sources {
+		if _, ok := keep[source.SourceNumber]; ok {
+			out = append(out, source)
+		}
 	}
 	return out
 }

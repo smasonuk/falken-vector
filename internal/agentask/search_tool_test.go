@@ -301,8 +301,50 @@ func TestSearchIndexToolDuplicateAcrossSearchesKeepsSourceNumber(t *testing.T) {
 	if secondPayload.NewSources != 0 || secondPayload.DuplicateSources != 1 {
 		t.Fatalf("second metrics = new %d dup %d, want duplicate source reuse", secondPayload.NewSources, secondPayload.DuplicateSources)
 	}
+	if !strings.Contains(second.Content, "added no new sources") {
+		t.Fatalf("second content = %q, want duplicate stop hint", second.Content)
+	}
 	if !strings.Contains(second.Content, "[source 1]") {
 		t.Fatalf("second content = %q, want reused source 1", second.Content)
+	}
+}
+
+func TestSearchIndexToolFocusedStrategyReturnsSuggestedQueries(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	retrievalCalls := 0
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 5,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			retrievalCalls++
+			return rag.RetrieveResult{
+				Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{
+					testRetrievedChunk("alphafold-outputs", "alphafold/meetings/sdb.md", "AlphaFold outputs include FASTA, A3M, PDB, error JSON, UniProt metadata, monomer, dimer, and ligand workflow notes.", "indexed"),
+				},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"AlphaFold","strategy":"focused"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if retrievalCalls != 1 {
+		t.Fatalf("retrieval calls = %d, want suggestions not to execute searches", retrievalCalls)
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	got := strings.Join(payload.SuggestedQueries, "\n")
+	for _, want := range []string{"AlphaFold A3M PDB", "UniProt", "monomer"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("suggested queries = %+v, want %q", payload.SuggestedQueries, want)
+		}
+	}
+	if !strings.Contains(result.Content, "Suggested follow-up queries:") {
+		t.Fatalf("content = %q, want suggested query section", result.Content)
 	}
 }
 

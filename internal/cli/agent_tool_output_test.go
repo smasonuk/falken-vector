@@ -76,6 +76,7 @@ func TestFormatAgentToolResultSearchIndexSummary(t *testing.T) {
 			"top_k": 12,
 			"seed_query_plan": {"queries": ["AlphaFold folding", "A3M PDB"]},
 			"expansion_queries": ["AlphaFold folding A3M PDB error JSON"],
+			"suggested_queries": ["AlphaFold folding UniProt metadata"],
 			"new_sources": 2,
 			"duplicate_sources": 1,
 			"unique_documents": 2,
@@ -95,6 +96,8 @@ func TestFormatAgentToolResultSearchIndexSummary(t *testing.T) {
 		"  2. A3M PDB",
 		"agent broad expansion queries:",
 		"  1. AlphaFold folding A3M PDB error JSON",
+		"agent suggested follow-up queries:",
+		"  1. AlphaFold folding UniProt metadata",
 		"agent tool warning: search_index: top_k raised to configured floor 12",
 	} {
 		if !strings.Contains(got, want) {

@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smasonuk/falken-vector/internal/agentask"
 	internalconfig "github.com/smasonuk/falken-vector/internal/config"
 	"github.com/smasonuk/falken-vector/internal/manifest"
+	"github.com/smasonuk/falken-vector/internal/rag"
 	"github.com/smasonuk/falken-vector/pkg/embeddings"
 )
 
@@ -249,6 +251,42 @@ func TestEngineAskRAGReturnsAnswerAndEventOrder(t *testing.T) {
 	}
 	if got := eventTypes(events); !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+func TestAnswerFromRAGSeparatesAvailableAndCitedSources(t *testing.T) {
+	answer := answerFromRAG(rag.AskResult{
+		Answer: "Alpha is documented. [source 2]",
+		Sources: []rag.SourceChunk{
+			{SourceNumber: 1, Path: "available.md", StartLine: 1, EndLine: 2},
+			{SourceNumber: 2, Path: "cited.md", StartLine: 3, EndLine: 4},
+		},
+	})
+	if len(answer.Sources) != 2 || len(answer.AvailableSources) != 2 {
+		t.Fatalf("answer sources = %+v available=%+v, want all available", answer.Sources, answer.AvailableSources)
+	}
+	if len(answer.CitedSources) != 1 || answer.CitedSources[0].Number != 2 {
+		t.Fatalf("cited sources = %+v, want source 2", answer.CitedSources)
+	}
+}
+
+func TestAnswerFromAgentSeparatesAvailableAndCitedSources(t *testing.T) {
+	answer := answerFromAgent(agentask.Result{
+		Answer: "Agent answer. [source 2]",
+		Sources: []rag.SourceChunk{
+			{SourceNumber: 1, Path: "available.go", StartLine: 1, EndLine: 2},
+			{SourceNumber: 2, Path: "cited.go", StartLine: 3, EndLine: 4},
+		},
+		ToolCalls: []string{"search_index"},
+	})
+	if len(answer.Sources) != 2 || len(answer.AvailableSources) != 2 {
+		t.Fatalf("answer sources = %+v available=%+v, want all available", answer.Sources, answer.AvailableSources)
+	}
+	if len(answer.CitedSources) != 1 || answer.CitedSources[0].Number != 2 {
+		t.Fatalf("cited sources = %+v, want source 2", answer.CitedSources)
+	}
+	if len(answer.ToolCalls) != 1 || answer.ToolCalls[0].Name != "search_index" {
+		t.Fatalf("tool calls = %+v", answer.ToolCalls)
 	}
 }
 

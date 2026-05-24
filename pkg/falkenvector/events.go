@@ -147,7 +147,8 @@ type ToolResultEvent struct {
 
 // AnswerEvent describes the final answer metadata for a run.
 type AnswerEvent struct {
-	Text             string            `json:"text,omitempty"`
+	Text string `json:"text,omitempty"`
+	// SourceCount is the number of available sources returned with Answer.Sources.
 	SourceCount      int               `json:"source_count,omitempty"`
 	CitationWarnings []string          `json:"citation_warnings,omitempty"`
 	CitationValid    bool              `json:"citation_valid,omitempty"`

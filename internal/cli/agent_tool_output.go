@@ -83,14 +83,43 @@ func truncateAgentToolArguments(value string) string {
 }
 
 func printAgentToolEvent(w io.Writer, event falken.Event) {
+	newAgentToolPrinter().printEvent(w, event)
+}
+
+type agentToolPrinter struct {
+	seenWarnings map[string]struct{}
+}
+
+func newAgentToolPrinter() *agentToolPrinter {
+	return &agentToolPrinter{seenWarnings: map[string]struct{}{}}
+}
+
+func (p *agentToolPrinter) printEvent(w io.Writer, event falken.Event) {
 	if event.ToolCall != nil {
 		fmt.Fprintf(w, "agent tool call: %s %s\n", event.ToolCall.Name, formatAgentToolArguments(event.ToolCall.Arguments))
 	}
 	if event.ToolResult != nil {
 		for _, line := range formatAgentToolResult(*event.ToolResult) {
+			if !p.shouldPrintLine(line) {
+				continue
+			}
 			fmt.Fprintln(w, line)
 		}
 	}
+}
+
+func (p *agentToolPrinter) shouldPrintLine(line string) bool {
+	if !strings.HasPrefix(line, "agent tool warning: ") {
+		return true
+	}
+	if p.seenWarnings == nil {
+		p.seenWarnings = map[string]struct{}{}
+	}
+	if _, ok := p.seenWarnings[line]; ok {
+		return false
+	}
+	p.seenWarnings[line] = struct{}{}
+	return true
 }
 
 func formatAgentToolResult(result falken.ToolResult) []string {
@@ -128,6 +157,7 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 		} `json:"seed_query_plan"`
 		Sources          []json.RawMessage `json:"sources"`
 		ExpansionQueries []string          `json:"expansion_queries"`
+		SuggestedQueries []string          `json:"suggested_queries"`
 		NewSources       int               `json:"new_sources"`
 		DuplicateSources int               `json:"duplicate_sources"`
 		UniqueDocuments  int               `json:"unique_documents"`
@@ -164,6 +194,12 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 	if len(payload.ExpansionQueries) != 0 {
 		out = append(out, "agent broad expansion queries:")
 		for i, query := range payload.ExpansionQueries {
+			out = append(out, fmt.Sprintf("  %d. %s", i+1, query))
+		}
+	}
+	if len(payload.SuggestedQueries) != 0 {
+		out = append(out, "agent suggested follow-up queries:")
+		for i, query := range payload.SuggestedQueries {
 			out = append(out, fmt.Sprintf("  %d. %s", i+1, query))
 		}
 	}

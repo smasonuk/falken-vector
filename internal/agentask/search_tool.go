@@ -22,6 +22,8 @@ type SearchToolOptions struct {
 	Paths config.Paths
 	Store manifest.Store
 
+	UserQuestion string
+
 	RetrievalDefaults rag.RetrieveOptions
 
 	Registry *CitationRegistry
@@ -42,8 +44,9 @@ type SearchToolOptions struct {
 
 	ConfigureQueryPlanner func(*rag.RetrieveOptions) error
 
-	MaxSearchCalls int
-	MaxTopK        int
+	MaxSearchCalls      int
+	MaxTopK             int
+	MaxExpansionQueries int
 }
 
 type searchIndexToolState struct {
@@ -113,7 +116,7 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	if err != nil {
 		return failedSearchToolResult("invalid_arguments", err.Error(), nil), nil
 	}
-	query := strings.TrimSpace(args.Query)
+	query := normalizeSearchQuery(args.Query)
 	if query == "" {
 		return failedSearchToolResult("invalid_arguments", "query is required", nil), nil
 	}
@@ -128,6 +131,13 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	if err != nil {
 		return failedSearchToolResult("invalid_strategy", err.Error(), nil), nil
 	}
+	if strings.TrimSpace(args.Strategy) == "" && isBroadCoverageQuestion(s.opts.UserQuestion) {
+		strategy = "broad"
+	}
+	maxExpansionQueries := s.opts.MaxExpansionQueries
+	if maxExpansionQueries <= 0 {
+		maxExpansionQueries = 3
+	}
 
 	s.mu.Lock()
 	if s.calls >= maxSearchCalls {
@@ -137,33 +147,54 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	s.calls++
 	s.mu.Unlock()
 
-	retrieveOpts, result, failure, ok := s.retrieveOnce(ctx, retrieveOpts, query, topK, mode)
+	retrieveOpts, result, failure, ok := s.retrieveOnce(ctx, retrieveOpts, query, topK, mode, true)
 	if !ok {
 		return failure, nil
 	}
+	seedPlan := result.Plan
+	internalPlans := []searchQueryPlanPayload{queryPlanPayload(seedPlan)}
+	retrievalCalls := 1
 	expansionQueries := []string{}
 	if strategy == "broad" && len(result.Chunks) != 0 {
 		seedSources := sourceChunksFromRetrieved(result.Chunks)
-		expansionQueries = SuggestFollowupQueries(query, seedSources, 3)
+		expansionQueries = SuggestFollowupQueries(query, seedSources, maxExpansionQueries)
 		if len(expansionQueries) != 0 {
 			results := []rag.RetrieveResult{result}
 			for _, expansionQuery := range expansionQueries {
-				_, expansionResult, failure, ok := s.retrieveOnce(ctx, s.opts.RetrievalDefaults, expansionQuery, topK, mode)
+				expansionOpts := s.opts.RetrievalDefaults
+				expansionOpts.QueryPlannerMode = rag.QueryPlannerModeNone
+				expansionOpts.QueryPlanner = nil
+				_, expansionResult, failure, ok := s.retrieveOnce(ctx, expansionOpts, expansionQuery, topK, mode, false)
 				if !ok {
 					return failure, nil
 				}
+				retrievalCalls++
+				internalPlans = append(internalPlans, queryPlanPayload(expansionResult.Plan))
 				results = append(results, expansionResult)
 			}
-			result = mergeBroadSearchResults(results, retrieveOpts.TopK)
+			result = mergeBroadSearchResultsForQuery(query, results, retrieveOpts.TopK)
 		}
 	}
 
 	sources := make([]searchSourcePayload, 0, len(result.Chunks))
+	beforeSourceCount := s.opts.Registry.SourceCount()
+	newSources := 0
+	documentIDs := map[string]struct{}{}
+	seenSourceNumbers := map[int]struct{}{}
 	for _, chunk := range result.Chunks {
 		source := s.opts.Registry.Register(chunk)
+		if source.SourceNumber > beforeSourceCount {
+			if _, alreadySeen := seenSourceNumbers[source.SourceNumber]; !alreadySeen {
+				newSources++
+			}
+		}
+		seenSourceNumbers[source.SourceNumber] = struct{}{}
+		if chunk.Chunk.DocumentID != "" {
+			documentIDs[chunk.Chunk.DocumentID] = struct{}{}
+		}
 		sources = append(sources, searchSourcePayload{
 			SourceNumber: source.SourceNumber,
-			Path:         source.Path,
+			Path:         rag.DisplayPath(source.Path, source.SourceRoot),
 			StartLine:    source.StartLine,
 			EndLine:      source.EndLine,
 			Score:        source.Score,
@@ -174,21 +205,24 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	}
 
 	payload := searchToolPayload{
-		Success:   true,
-		Status:    "ok",
-		Query:     query,
-		Strategy:  strategy,
-		Retrieval: string(retrieveOpts.Mode),
-		TopK:      retrieveOpts.TopK,
-		QueryPlan: searchQueryPlanPayload{
-			Mode:    result.Plan.Mode,
-			Queries: append([]string(nil), result.Plan.Queries...),
-		},
+		Success:          true,
+		Status:           "ok",
+		Query:            query,
+		Strategy:         strategy,
+		Retrieval:        string(retrieveOpts.Mode),
+		TopK:             retrieveOpts.TopK,
+		QueryPlan:        queryPlanPayload(seedPlan),
+		SeedQueryPlan:    queryPlanPayload(seedPlan),
+		InternalPlans:    internalPlans,
 		ExpansionQueries: expansionQueries,
+		NewSources:       newSources,
+		DuplicateSources: len(sources) - newSources,
+		UniqueDocuments:  len(documentIDs),
+		RetrievalCalls:   retrievalCalls,
 		Sources:          sources,
 		Warnings:         warnings,
 	}
-	return successfulSearchToolResult(renderSearchToolContent(query, strategy, result.Plan, expansionQueries, sources, warnings), payload), nil
+	return successfulSearchToolResult(renderSearchToolContent(query, strategy, seedPlan, expansionQueries, sources, warnings), payload), nil
 }
 
 func decodeSearchIndexArgs(raw json.RawMessage) (searchIndexArgs, error) {
@@ -250,7 +284,7 @@ func normalizeSearchStrategy(value string) (string, error) {
 	}
 }
 
-func (s *searchIndexToolState) retrieveOnce(ctx context.Context, retrieveOpts rag.RetrieveOptions, query string, topK int, mode rag.RetrievalMode) (rag.RetrieveOptions, rag.RetrieveResult, falken.ToolExecutionResult, bool) {
+func (s *searchIndexToolState) retrieveOnce(ctx context.Context, retrieveOpts rag.RetrieveOptions, query string, topK int, mode rag.RetrievalMode, configurePlanner bool) (rag.RetrieveOptions, rag.RetrieveResult, falken.ToolExecutionResult, bool) {
 	retrieveOpts.Question = query
 	retrieveOpts.TopK = topK
 	retrieveOpts.Mode = mode
@@ -274,7 +308,7 @@ func (s *searchIndexToolState) retrieveOnce(ctx context.Context, retrieveOpts ra
 		}
 		retrieveOpts.Embedder = embedder
 	}
-	if s.opts.ConfigureQueryPlanner != nil {
+	if configurePlanner && s.opts.ConfigureQueryPlanner != nil {
 		if err := s.opts.ConfigureQueryPlanner(&retrieveOpts); err != nil {
 			return rag.RetrieveOptions{}, rag.RetrieveResult{}, failedSearchToolResult("configure_query_planner_failed", err.Error(), nil), false
 		}
@@ -300,6 +334,7 @@ func sourceChunksFromRetrieved(chunks []rag.RetrievedChunk) []rag.SourceChunk {
 		sources = append(sources, rag.SourceChunk{
 			SourceNumber: i + 1,
 			Path:         chunk.Path,
+			SourceRoot:   chunk.SourceRoot,
 			StartLine:    chunk.Chunk.StartLine,
 			EndLine:      chunk.Chunk.EndLine,
 			Text:         chunk.Chunk.ChunkText,
@@ -310,8 +345,20 @@ func sourceChunksFromRetrieved(chunks []rag.RetrievedChunk) []rag.SourceChunk {
 }
 
 func mergeBroadSearchResults(results []rag.RetrieveResult, topK int) rag.RetrieveResult {
+	return mergeBroadSearchResultsForQuery("", results, topK)
+}
+
+func mergeBroadSearchResultsForQuery(originalQuery string, results []rag.RetrieveResult, topK int) rag.RetrieveResult {
 	merged := rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "broad"}}
 	seen := map[string]struct{}{}
+	seedDocs := map[string]struct{}{}
+	if len(results) != 0 {
+		for _, chunk := range results[0].Chunks {
+			if chunk.Chunk.DocumentID != "" {
+				seedDocs[chunk.Chunk.DocumentID] = struct{}{}
+			}
+		}
+	}
 	for _, result := range results {
 		if merged.Plan.Mode == "broad" && result.Plan.Mode != "" {
 			merged.Plan.Mode = result.Plan.Mode
@@ -326,11 +373,14 @@ func mergeBroadSearchResults(results []rag.RetrieveResult, topK int) rag.Retriev
 		}
 	}
 	for rank := 0; rank < maxLen; rank++ {
-		for _, result := range results {
+		for resultIndex, result := range results {
 			if rank >= len(result.Chunks) {
 				continue
 			}
 			chunk := result.Chunks[rank]
+			if resultIndex > 0 && !keepExpansionChunk(originalQuery, seedDocs, chunk) {
+				continue
+			}
 			key := retrievedChunkKey(chunk)
 			if _, ok := seen[key]; ok {
 				continue
@@ -345,11 +395,44 @@ func mergeBroadSearchResults(results []rag.RetrieveResult, topK int) rag.Retriev
 	return merged
 }
 
+func keepExpansionChunk(originalQuery string, seedDocs map[string]struct{}, chunk rag.RetrievedChunk) bool {
+	if chunk.Chunk.DocumentID != "" {
+		if _, ok := seedDocs[chunk.Chunk.DocumentID]; ok {
+			return true
+		}
+	}
+	haystack := strings.ToLower(chunk.Chunk.ChunkText + " " + chunk.Path)
+	for _, anchor := range anchorTerms(originalQuery) {
+		if strings.Contains(haystack, strings.ToLower(anchor)) {
+			return true
+		}
+	}
+	return false
+}
+
+func anchorTerms(query string) []string {
+	tokens := wordTokenPattern.FindAllString(query, -1)
+	anchors := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if usefulTopicTerm(token) {
+			anchors = append(anchors, token)
+		}
+	}
+	return uniqueTerms(anchors)
+}
+
 func retrievedChunkKey(chunk rag.RetrievedChunk) string {
 	if chunk.Chunk.ID != "" {
 		return "chunk:" + chunk.Chunk.ID
 	}
 	return fmt.Sprintf("fallback:%s:%d:%d:%s", chunk.Path, chunk.Chunk.StartLine, chunk.Chunk.EndLine, chunk.Chunk.ChunkText)
+}
+
+func queryPlanPayload(plan rag.QueryPlan) searchQueryPlanPayload {
+	return searchQueryPlanPayload{
+		Mode:    plan.Mode,
+		Queries: append([]string(nil), plan.Queries...),
+	}
 }
 
 func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, expansionQueries []string, sources []searchSourcePayload, warnings []string) string {
@@ -425,17 +508,23 @@ func marshalSearchToolPayload(payload searchToolPayload) json.RawMessage {
 }
 
 type searchToolPayload struct {
-	Success          bool                   `json:"success"`
-	Status           string                 `json:"status"`
-	Query            string                 `json:"query,omitempty"`
-	Strategy         string                 `json:"strategy,omitempty"`
-	Retrieval        string                 `json:"retrieval,omitempty"`
-	TopK             int                    `json:"top_k,omitempty"`
-	QueryPlan        searchQueryPlanPayload `json:"query_plan,omitempty"`
-	ExpansionQueries []string               `json:"expansion_queries,omitempty"`
-	Sources          []searchSourcePayload  `json:"sources,omitempty"`
-	Warnings         []string               `json:"warnings"`
-	Error            string                 `json:"error,omitempty"`
+	Success          bool                     `json:"success"`
+	Status           string                   `json:"status"`
+	Query            string                   `json:"query,omitempty"`
+	Strategy         string                   `json:"strategy,omitempty"`
+	Retrieval        string                   `json:"retrieval,omitempty"`
+	TopK             int                      `json:"top_k,omitempty"`
+	QueryPlan        searchQueryPlanPayload   `json:"query_plan,omitempty"`
+	SeedQueryPlan    searchQueryPlanPayload   `json:"seed_query_plan,omitempty"`
+	InternalPlans    []searchQueryPlanPayload `json:"internal_query_plans,omitempty"`
+	ExpansionQueries []string                 `json:"expansion_queries,omitempty"`
+	NewSources       int                      `json:"new_sources,omitempty"`
+	DuplicateSources int                      `json:"duplicate_sources,omitempty"`
+	UniqueDocuments  int                      `json:"unique_documents,omitempty"`
+	RetrievalCalls   int                      `json:"retrieval_calls,omitempty"`
+	Sources          []searchSourcePayload    `json:"sources,omitempty"`
+	Warnings         []string                 `json:"warnings"`
+	Error            string                   `json:"error,omitempty"`
 }
 
 type searchQueryPlanPayload struct {

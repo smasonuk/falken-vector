@@ -66,6 +66,18 @@ func TestHeuristicPlannerDeduplicatesAndRespectsMaxSubqueries(t *testing.T) {
 	}
 }
 
+func TestHeuristicPlannerNormalizesCaseDuplicateTerms(t *testing.T) {
+	queries := BuildHeuristicSubqueries("AlphaFold alphafold", 4)
+	if len(queries) == 0 || queries[0] != "AlphaFold" {
+		t.Fatalf("queries = %+v, want original query normalized to AlphaFold", queries)
+	}
+	for _, query := range queries {
+		if strings.Contains(query, "AlphaFold alphafold") {
+			t.Fatalf("queries = %+v, leaked case duplicate", queries)
+		}
+	}
+}
+
 func TestLLMPlannerParsesStrictJSONAndPrependsOriginalQuestion(t *testing.T) {
 	planner := LLMQueryPlanner{LLM: fakePlannerLLM{text: `{"subqueries":["compact vector database","manifest activation"]}`}}
 	plan, err := planner.Plan(context.Background(), "How does compact work?", QueryPlanOptions{MaxSubqueries: 3})

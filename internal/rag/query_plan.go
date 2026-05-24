@@ -132,10 +132,10 @@ func ExtractQueryTerms(question string) QueryTerms {
 
 func BuildHeuristicSubqueries(question string, max int) []string {
 	max = normalizeMaxSubqueries(max)
-	question = strings.TrimSpace(question)
+	question = normalizeQueryText(question)
 	queries := make([]string, 0, max)
 	add := func(query string) {
-		query = strings.TrimSpace(query)
+		query = normalizeQueryText(query)
 		if query == "" {
 			return
 		}
@@ -166,7 +166,7 @@ func BuildHeuristicSubqueries(question string, max int) []string {
 }
 
 func buildQueryPlan(ctx context.Context, opts RetrieveOptions) (QueryPlan, error) {
-	question := strings.TrimSpace(opts.Question)
+	question := normalizeQueryText(opts.Question)
 	if question == "" {
 		return QueryPlan{}, errors.New("question is required")
 	}
@@ -204,7 +204,7 @@ func normalizeQueries(question string, queries []string, max int) []string {
 	max = normalizeMaxSubqueries(max)
 	out := make([]string, 0, max)
 	add := func(query string) {
-		query = strings.TrimSpace(query)
+		query = normalizeQueryText(query)
 		if query == "" {
 			return
 		}
@@ -222,6 +222,25 @@ func normalizeQueries(question string, queries []string, max int) []string {
 		add(query)
 	}
 	return out
+}
+
+func normalizeQueryText(query string) string {
+	words := strings.Fields(query)
+	out := make([]string, 0, len(words))
+	seen := map[string]struct{}{}
+	for _, word := range words {
+		word = strings.Trim(word, " \t\r\n.,:;()[]{}")
+		key := strings.ToLower(word)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, word)
+	}
+	return strings.Join(out, " ")
 }
 
 func joinLimited(values []string, limit int) string {

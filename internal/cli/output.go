@@ -54,10 +54,11 @@ func printQueryPlan(w io.Writer, plan rag.QueryPlan) {
 }
 
 func SourceReference(source rag.SourceChunk) string {
+	path := rag.DisplayPath(source.Path, source.SourceRoot)
 	if source.StartLine > 0 && source.EndLine > 0 {
-		return fmt.Sprintf("[source %d] %s:%d-%d", source.SourceNumber, source.Path, source.StartLine, source.EndLine)
+		return fmt.Sprintf("[source %d] %s:%d-%d", source.SourceNumber, path, source.StartLine, source.EndLine)
 	}
-	return fmt.Sprintf("[source %d] %s", source.SourceNumber, source.Path)
+	return fmt.Sprintf("[source %d] %s", source.SourceNumber, path)
 }
 
 func printSources(w io.Writer, sources []rag.SourceChunk) {

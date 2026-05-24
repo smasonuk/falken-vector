@@ -315,6 +315,61 @@ func TestAskAgentResultWithSourcePrintsReference(t *testing.T) {
 	}
 }
 
+func TestAskAgentPrintsOnlyCitedSourcesByDefault(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 2].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "uncited.go", StartLine: 1, EndLine: 2},
+				{SourceNumber: 2, Path: "cited.go", StartLine: 3, EndLine: 4},
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, "[source 2] cited.go:3-4") {
+		t.Fatalf("output = %q, want cited source", output)
+	}
+	if strings.Contains(output, "uncited.go") {
+		t.Fatalf("output = %q, want uncited source hidden by default", output)
+	}
+}
+
+func TestAskAgentSourcesAllPrintsRetrievedSources(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 2].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "uncited.go", StartLine: 1, EndLine: 2},
+				{SourceNumber: 2, Path: "cited.go", StartLine: 3, EndLine: 4},
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "all"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, "uncited.go") || !strings.Contains(output, "cited.go") {
+		t.Fatalf("output = %q, want all sources", output)
+	}
+}
+
 func TestAskAgentResultWithoutSourcesOmitsSourcesSection(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
 	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {

@@ -39,6 +39,7 @@ func (r *CitationRegistry) Register(chunk rag.RetrievedChunk) rag.SourceChunk {
 	source := rag.SourceChunk{
 		SourceNumber: r.next,
 		Path:         chunk.Path,
+		SourceRoot:   chunk.SourceRoot,
 		StartLine:    chunk.Chunk.StartLine,
 		EndLine:      chunk.Chunk.EndLine,
 		Text:         chunk.Chunk.ChunkText,

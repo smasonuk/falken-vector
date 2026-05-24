@@ -297,6 +297,10 @@ func TestSearchIndexToolDuplicateAcrossSearchesKeepsSourceNumber(t *testing.T) {
 	if registry.SourceCount() != 1 {
 		t.Fatalf("source count = %d, want duplicate kept at 1", registry.SourceCount())
 	}
+	secondPayload := decodeSearchPayload(t, second.Payload)
+	if secondPayload.NewSources != 0 || secondPayload.DuplicateSources != 1 {
+		t.Fatalf("second metrics = new %d dup %d, want duplicate source reuse", secondPayload.NewSources, secondPayload.DuplicateSources)
+	}
 	if !strings.Contains(second.Content, "[source 1]") {
 		t.Fatalf("second content = %q, want reused source 1", second.Content)
 	}
@@ -340,11 +344,118 @@ func TestSearchIndexToolBroadStrategyExpandsFromFirstPassSources(t *testing.T) {
 	if payload.Strategy != "broad" || len(payload.ExpansionQueries) == 0 {
 		t.Fatalf("payload = %+v, want broad strategy with expansion queries", payload)
 	}
+	if payload.NewSources != 2 || payload.DuplicateSources != 0 || payload.UniqueDocuments != 1 || payload.RetrievalCalls < 2 {
+		t.Fatalf("payload metrics = new %d dup %d docs %d retrievals %d, want useful broad metrics", payload.NewSources, payload.DuplicateSources, payload.UniqueDocuments, payload.RetrievalCalls)
+	}
 	if len(payload.Sources) != 2 {
 		t.Fatalf("sources = %+v, want two fused sources", payload.Sources)
 	}
 	if !strings.Contains(result.Content, "Broad search expansion queries:") {
 		t.Fatalf("content = %q, want broad strategy debug output", result.Content)
+	}
+}
+
+func TestSearchIndexToolDefaultsBroadStrategyForBroadUserQuestion(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	seenQueries := []string{}
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:        paths,
+		Store:        manifest.EmptyStore{},
+		UserQuestion: "summarize anything related to AlphaFold folding",
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 5,
+		},
+		MaxExpansionQueries: 1,
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			seenQueries = append(seenQueries, opts.Question)
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{testRetrievedChunk("alphafold-outputs", "alphafold/meetings/sdb.md", "AlphaFold outputs include A3M, PDB, error JSON, UniProt, monomer, dimer, and ligand.", "indexed")},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"AlphaFold"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	payload := decodeSearchPayload(t, result.Payload)
+	if payload.Strategy != "broad" {
+		t.Fatalf("strategy = %q, want broad", payload.Strategy)
+	}
+	if len(payload.ExpansionQueries) != 1 {
+		t.Fatalf("expansion queries = %+v, want one configured expansion", payload.ExpansionQueries)
+	}
+	if len(seenQueries) != 2 {
+		t.Fatalf("seen queries = %+v, want seed plus one expansion", seenQueries)
+	}
+}
+
+func TestBroadExpansionDoesNotRunHeuristicPlannerOnExpansionQueries(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	configureCalls := 0
+	var expansionPlannerModes []rag.QueryPlannerMode
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode:             rag.RetrievalModeLexical,
+			TopK:             5,
+			QueryPlannerMode: rag.QueryPlannerModeHeuristic,
+		},
+		ConfigureQueryPlanner: func(opts *rag.RetrieveOptions) error {
+			configureCalls++
+			opts.QueryPlannerMode = rag.QueryPlannerModeHeuristic
+			return nil
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			if opts.Question != "AlphaFold folding" {
+				expansionPlannerModes = append(expansionPlannerModes, opts.QueryPlannerMode)
+			}
+			chunk := testRetrievedChunk("seed", "alphafold/meetings/sdb.md", "AlphaFold outputs include A3M, PDB, error JSON, UniProt, monomer, dimer, and ligand.", "indexed")
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: string(opts.QueryPlannerMode), Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{chunk},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"AlphaFold folding","strategy":"broad"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if configureCalls != 1 {
+		t.Fatalf("ConfigureQueryPlanner calls = %d, want seed query only", configureCalls)
+	}
+	if len(expansionPlannerModes) == 0 {
+		t.Fatal("expansion planner modes empty, want expansion retrievals")
+	}
+	for _, mode := range expansionPlannerModes {
+		if mode != rag.QueryPlannerModeNone {
+			t.Fatalf("expansion planner mode = %q, want none", mode)
+		}
+	}
+}
+
+func TestSearchIndexToolNormalizesDuplicateQueryTerms(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	var seenQuery string
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			seenQuery = opts.Question
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"protein folding folding"}`)
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if seenQuery != "protein folding" {
+		t.Fatalf("query = %q, want duplicate term removed", seenQuery)
 	}
 }
 

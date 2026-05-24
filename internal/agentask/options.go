@@ -42,6 +42,10 @@ type Options struct {
 	MaxSearchCalls int
 	MaxToolTopK    int
 
+	// MaxBroadExpansionQueries limits internal follow-up retrievals for one broad search.
+	// Values <= 0 use the default.
+	MaxBroadExpansionQueries int
+
 	// CoverageNudge controls broad-question coverage retries. Nil uses the default-on policy.
 	CoverageNudge       *bool
 	MinBroadSearchCalls int

@@ -494,6 +494,13 @@ func TestSourceReferenceFormatsLineRange(t *testing.T) {
 	}
 }
 
+func TestSourceReferenceUsesSourceRootRelativePath(t *testing.T) {
+	got := SourceReference(rag.SourceChunk{SourceNumber: 2, Path: "/repo/test_vec/source/alphafold/meetings/sdb.md", SourceRoot: "/repo/test_vec/source", StartLine: 35, EndLine: 73})
+	if got != "[source 2] alphafold/meetings/sdb.md:35-73" {
+		t.Fatalf("SourceReference = %q", got)
+	}
+}
+
 func TestAskPrintsEditorFriendlySources(t *testing.T) {
 	var out bytes.Buffer
 	printAnswer(&out, rag.AskResult{

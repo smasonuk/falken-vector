@@ -38,6 +38,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	searchTool := NewSearchIndexTool(SearchToolOptions{
 		Paths:                 opts.Paths,
 		Store:                 opts.Store,
+		UserQuestion:          opts.Question,
 		RetrievalDefaults:     opts.RetrievalDefaults,
 		Registry:              registry,
 		EmbedderFactory:       opts.EmbedderFactory,
@@ -46,6 +47,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		ConfigureQueryPlanner: opts.ConfigureQueryPlanner,
 		MaxSearchCalls:        opts.MaxSearchCalls,
 		MaxTopK:               opts.MaxToolTopK,
+		MaxExpansionQueries:   opts.MaxBroadExpansionQueries,
 	})
 	agentTools := []falken.Tool{searchTool}
 	if opts.EnableReadSourceTool {

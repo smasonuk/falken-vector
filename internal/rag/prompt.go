@@ -25,6 +25,7 @@ If the answer is not supported by the context, say you do not know and cite the 
 type SourceChunk struct {
 	SourceNumber int
 	Path         string
+	SourceRoot   string
 	StartLine    int
 	EndLine      int
 	Text         string
@@ -52,7 +53,7 @@ func BuildPrompt(question string, chunks []SourceChunk) (BuiltPrompt, error) {
 		chunk.SourceNumber = i + 1
 		sources[i] = chunk
 		fmt.Fprintf(&b, "[source %d]\n", chunk.SourceNumber)
-		fmt.Fprintf(&b, "Path: %s\n", chunk.Path)
+		fmt.Fprintf(&b, "Path: %s\n", DisplayPath(chunk.Path, chunk.SourceRoot))
 		fmt.Fprintf(&b, "Lines: %d-%d\n", chunk.StartLine, chunk.EndLine)
 		b.WriteString("Text:\n")
 		b.WriteString(chunk.Text)
@@ -70,6 +71,7 @@ func SourceChunksFromRetrieved(chunks []RetrievedChunk) []SourceChunk {
 		out = append(out, SourceChunk{
 			SourceNumber: i + 1,
 			Path:         chunk.Path,
+			SourceRoot:   chunk.SourceRoot,
 			StartLine:    chunk.Chunk.StartLine,
 			EndLine:      chunk.Chunk.EndLine,
 			Text:         chunk.Chunk.ChunkText,

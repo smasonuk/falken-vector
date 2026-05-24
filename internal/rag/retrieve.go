@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -58,6 +59,7 @@ type RetrieveOptions struct {
 type RetrievedChunk struct {
 	Chunk       manifest.Chunk
 	Path        string
+	SourceRoot  string
 	Score       float32
 	RankScore   float64
 	Sources     []string
@@ -322,12 +324,26 @@ func toRetrievedChunk(result candidateResult) RetrievedChunk {
 	return RetrievedChunk{
 		Chunk:       result.chunk,
 		Path:        result.document.Path,
+		SourceRoot:  result.document.SourceRoot,
 		Score:       score,
 		RankScore:   result.candidate.FusedScore,
 		Sources:     append([]string(nil), result.candidate.Sources...),
 		RerankScore: result.rerankScore,
 		Reranker:    result.reranker,
 	}
+}
+
+func DisplayPath(path, sourceRoot string) string {
+	path = strings.TrimSpace(path)
+	sourceRoot = strings.TrimSpace(sourceRoot)
+	if path == "" || sourceRoot == "" {
+		return path
+	}
+	rel, err := filepath.Rel(sourceRoot, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+		return path
+	}
+	return filepath.ToSlash(rel)
 }
 
 func maybeRerankCandidateResults(ctx context.Context, question string, results []candidateResult, opts RetrieveOptions) ([]candidateResult, error) {

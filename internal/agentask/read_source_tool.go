@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/smasonuk/falken-core/pkg/falken"
+	"github.com/smasonuk/falken-vector/internal/rag"
 )
 
 const ReadIndexSourceToolName = "read_index_source"
@@ -61,13 +62,13 @@ func NewReadIndexSourceTool(opts ReadSourceToolOptions) falken.Tool {
 			Success:      true,
 			Status:       "ok",
 			SourceNumber: source.SourceNumber,
-			Path:         source.Path,
+			Path:         rag.DisplayPath(source.Path, source.SourceRoot),
 			StartLine:    startLine,
 			EndLine:      endLine,
 			Text:         text,
 			Warnings:     warnings,
 		}
-		content := fmt.Sprintf("[source %d] %s:%d-%d expanded context\nText:\n%s\n\nContinue citing [source %d].", source.SourceNumber, source.Path, startLine, endLine, text, source.SourceNumber)
+		content := fmt.Sprintf("[source %d] %s:%d-%d expanded context\nText:\n%s\n\nContinue citing [source %d].", source.SourceNumber, rag.DisplayPath(source.Path, source.SourceRoot), startLine, endLine, text, source.SourceNumber)
 		return falken.ToolExecutionResult{
 			Success: true,
 			Status:  "ok",

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/smasonuk/falken-core/pkg/falken"
 	"github.com/smasonuk/falken-vector/internal/agentask"
@@ -30,6 +31,7 @@ func newAskCommand(opts *options) *cobra.Command {
 	var noCitationRetry bool
 	var agentMode bool
 	var showAgentTools bool
+	var sourcesMode string
 	var agentCoverageNudge bool
 	var noAgentCoverageNudge bool
 	var minAgentSearches int
@@ -45,6 +47,9 @@ func newAskCommand(opts *options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := commandContext(cmd, opts)
 			defer cancel()
+			if err := validateSourcesMode(sourcesMode); err != nil {
+				return err
+			}
 
 			paths, err := resolvePaths(opts)
 			if err != nil {
@@ -120,7 +125,7 @@ func newAskCommand(opts *options) *cobra.Command {
 					printCoverageWarnings(cmd.ErrOrStderr(), result.CoverageWarnings)
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
-				printAnswerText(cmd.OutOrStdout(), result.Answer, result.Sources)
+				printAnswerText(cmd.OutOrStdout(), result.Answer, sourcesForAnswer(result.Answer, result.Sources, sourcesMode))
 				return nil
 			}
 			if err := prepareLexicalIndex(ctx, store, retrievalOpts.Mode); err != nil {
@@ -178,7 +183,7 @@ func newAskCommand(opts *options) *cobra.Command {
 				return fmt.Errorf("ask LLM: %w", err)
 			}
 			printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
-			printAnswer(cmd.OutOrStdout(), result)
+			printAnswerWithSourcesMode(cmd.OutOrStdout(), result, sourcesMode)
 			return nil
 		},
 	}
@@ -187,6 +192,7 @@ func newAskCommand(opts *options) *cobra.Command {
 	cmd.Flags().IntVar(&openSource, "open-source", 0, "open retrieved source number in configured editor")
 	cmd.Flags().BoolVar(&noCitationValidation, "no-citation-validation", false, "disable answer citation validation")
 	cmd.Flags().BoolVar(&noCitationRetry, "no-citation-retry", false, "disable stricter citation retry")
+	cmd.Flags().StringVar(&sourcesMode, "sources", "cited", "sources to print with answers: cited or all")
 	cmd.Flags().BoolVar(&agentMode, "agent", false, "use a Falken agent with a search_index tool instead of pre-attaching retrieved chunks")
 	cmd.Flags().BoolVar(&showAgentTools, "show-agent-tools", false, "print agent tool calls and compact tool results to stderr")
 	cmd.Flags().IntVar(&maxAgentSearches, "max-agent-searches", 6, "maximum number of search_index calls allowed during one agent ask run")
@@ -201,7 +207,11 @@ func newAskCommand(opts *options) *cobra.Command {
 }
 
 func printAnswer(w io.Writer, result rag.AskResult) {
-	printAnswerText(w, result.Answer, result.Sources)
+	printAnswerWithSourcesMode(w, result, "all")
+}
+
+func printAnswerWithSourcesMode(w io.Writer, result rag.AskResult, sourcesMode string) {
+	printAnswerText(w, result.Answer, sourcesForAnswer(result.Answer, result.Sources, sourcesMode))
 }
 
 func printAnswerText(w io.Writer, answer string, sources []rag.SourceChunk) {
@@ -216,6 +226,44 @@ func printCitationWarnings(w io.Writer, warnings []string) {
 	for _, warning := range warnings {
 		fmt.Fprintf(w, "warning: %s\n", warning)
 	}
+}
+
+func sourcesForAnswer(answer string, sources []rag.SourceChunk, mode string) []rag.SourceChunk {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "cited":
+		return citedSourcesOnly(answer, sources)
+	case "all":
+		return sources
+	default:
+		return citedSourcesOnly(answer, sources)
+	}
+}
+
+func validateSourcesMode(mode string) error {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "cited", "all":
+		return nil
+	default:
+		return fmt.Errorf("--sources must be cited or all")
+	}
+}
+
+func citedSourcesOnly(answer string, sources []rag.SourceChunk) []rag.SourceChunk {
+	cited := rag.ExtractCitedSourceNumbers(answer)
+	if len(cited) == 0 {
+		return nil
+	}
+	keep := make(map[int]struct{}, len(cited))
+	for _, number := range cited {
+		keep[number] = struct{}{}
+	}
+	out := make([]rag.SourceChunk, 0, len(cited))
+	for _, source := range sources {
+		if _, ok := keep[source.SourceNumber]; ok {
+			out = append(out, source)
+		}
+	}
+	return out
 }
 
 func printCoverageWarnings(w io.Writer, warnings []string) {

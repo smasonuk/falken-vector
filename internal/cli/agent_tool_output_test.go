@@ -74,7 +74,12 @@ func TestFormatAgentToolResultSearchIndexSummary(t *testing.T) {
 			"status": "ok",
 			"query": "AlphaFold folding",
 			"top_k": 12,
-			"query_plan": {"queries": ["AlphaFold folding", "A3M PDB"]},
+			"seed_query_plan": {"queries": ["AlphaFold folding", "A3M PDB"]},
+			"expansion_queries": ["AlphaFold folding A3M PDB error JSON"],
+			"new_sources": 2,
+			"duplicate_sources": 1,
+			"unique_documents": 2,
+			"retrieval_calls": 4,
 			"sources": [
 				{"text": "source text that must not leak"},
 				{"text": "more source text"}
@@ -84,10 +89,12 @@ func TestFormatAgentToolResultSearchIndexSummary(t *testing.T) {
 	})
 	got := strings.Join(lines, "\n")
 	for _, want := range []string{
-		`agent tool result: search_index ok, query="AlphaFold folding", top_k=12, sources=2`,
-		"agent search query plan:",
+		`agent tool result: search_index ok, query="AlphaFold folding", top_k=12, sources=2, new=2, duplicates=1, docs=2, retrievals=4`,
+		"agent seed query plan:",
 		"  1. AlphaFold folding",
 		"  2. A3M PDB",
+		"agent broad expansion queries:",
+		"  1. AlphaFold folding A3M PDB error JSON",
 		"agent tool warning: search_index: top_k raised to configured floor 12",
 	} {
 		if !strings.Contains(got, want) {

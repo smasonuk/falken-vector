@@ -122,8 +122,16 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 			Mode    string   `json:"mode"`
 			Queries []string `json:"queries"`
 		} `json:"query_plan"`
+		SeedQueryPlan struct {
+			Mode    string   `json:"mode"`
+			Queries []string `json:"queries"`
+		} `json:"seed_query_plan"`
 		Sources          []json.RawMessage `json:"sources"`
 		ExpansionQueries []string          `json:"expansion_queries"`
+		NewSources       int               `json:"new_sources"`
+		DuplicateSources int               `json:"duplicate_sources"`
+		UniqueDocuments  int               `json:"unique_documents"`
+		RetrievalCalls   int               `json:"retrieval_calls"`
 		Warnings         []string          `json:"warnings"`
 		Error            string            `json:"error"`
 	}
@@ -134,12 +142,22 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 	if status == "" {
 		status, _ = agentToolResultStatus(result)
 	}
-	out := []string{
-		fmt.Sprintf("agent tool result: %s %s, query=%s, top_k=%d, sources=%d", result.Name, status, strconv.Quote(payload.Query), payload.TopK, len(payload.Sources)),
+	summary := fmt.Sprintf("agent tool result: %s %s, query=%s, top_k=%d, sources=%d", result.Name, status, strconv.Quote(payload.Query), payload.TopK, len(payload.Sources))
+	if payload.RetrievalCalls > 0 {
+		summary += fmt.Sprintf(", new=%d, duplicates=%d, docs=%d, retrievals=%d", payload.NewSources, payload.DuplicateSources, payload.UniqueDocuments, payload.RetrievalCalls)
 	}
-	if len(payload.QueryPlan.Queries) != 0 {
-		out = append(out, "agent search query plan:")
-		for i, query := range payload.QueryPlan.Queries {
+	out := []string{summary}
+	seedQueries := payload.SeedQueryPlan.Queries
+	label := "agent search query plan:"
+	if len(payload.ExpansionQueries) != 0 {
+		label = "agent seed query plan:"
+	}
+	if len(seedQueries) == 0 {
+		seedQueries = payload.QueryPlan.Queries
+	}
+	if len(seedQueries) != 0 {
+		out = append(out, label)
+		for i, query := range seedQueries {
 			out = append(out, fmt.Sprintf("  %d. %s", i+1, query))
 		}
 	}

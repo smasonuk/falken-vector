@@ -67,7 +67,7 @@ func thinSourceNudgeDecision(question string, readSourceEnabled bool, policy thi
 		return thinSourceDecision{Reason: "retry limit reached"}
 	}
 	readSources := readSourceNumbers(trace)
-	candidates := thinCitedSources(answer, sources, policy.LineThreshold, readSources)
+	candidates := thinCitedSources(answer, sources, policy.LineThreshold, policy.ContextLines, readSources)
 	if len(candidates) == 0 {
 		return thinSourceDecision{Reason: "no cited spans under threshold"}
 	}
@@ -82,7 +82,7 @@ func thinSourceNudgeDecision(question string, readSourceEnabled bool, policy thi
 	}
 }
 
-func thinCitedSources(answer string, sources []rag.SourceChunk, lineThreshold int, alreadyRead map[int]struct{}) []int {
+func thinCitedSources(answer string, sources []rag.SourceChunk, lineThreshold, contextLines int, alreadyRead map[int]struct{}) []int {
 	cited := rag.ExtractCitedSourceNumbers(answer)
 	if len(cited) == 0 {
 		return nil
@@ -93,6 +93,7 @@ func thinCitedSources(answer string, sources []rag.SourceChunk, lineThreshold in
 	}
 	out := make([]int, 0, len(cited))
 	seen := map[int]struct{}{}
+	selectedRanges := make([]sourceLineRange, 0, len(cited))
 	for _, source := range sources {
 		if _, ok := citedSet[source.SourceNumber]; !ok {
 			continue
@@ -106,10 +107,82 @@ func thinCitedSources(answer string, sources []rag.SourceChunk, lineThreshold in
 		if sourceLineSpan(source) > lineThreshold {
 			continue
 		}
+		projected := projectedSourceRange(source, contextLines)
+		if overlapsSelectedSourceRange(projected, selectedRanges) {
+			continue
+		}
 		seen[source.SourceNumber] = struct{}{}
+		selectedRanges = append(selectedRanges, projected)
 		out = append(out, source.SourceNumber)
 	}
 	return out
+}
+
+type sourceLineRange struct {
+	Key   string
+	Start int
+	End   int
+}
+
+func projectedSourceRange(source rag.SourceChunk, contextLines int) sourceLineRange {
+	if contextLines < 0 {
+		contextLines = 0
+	}
+	start := source.StartLine - contextLines
+	if start < 1 {
+		start = 1
+	}
+	end := source.EndLine + contextLines
+	if end < start {
+		end = start
+	}
+	return sourceLineRange{
+		Key:   source.Path,
+		Start: start,
+		End:   end,
+	}
+}
+
+func overlapsSelectedSourceRange(candidate sourceLineRange, selected []sourceLineRange) bool {
+	for _, existing := range selected {
+		if rangesOverlapEnough(candidate, existing) {
+			return true
+		}
+	}
+	return false
+}
+
+func rangesOverlapEnough(a, b sourceLineRange) bool {
+	if a.Key == "" || b.Key == "" || a.Key != b.Key {
+		return false
+	}
+	overlap := minInt(a.End, b.End) - maxInt(a.Start, b.Start) + 1
+	if overlap <= 0 {
+		return false
+	}
+	smaller := minInt(lineRangeLen(a), lineRangeLen(b))
+	return smaller > 0 && float64(overlap)/float64(smaller) >= 0.75
+}
+
+func lineRangeLen(r sourceLineRange) int {
+	if r.End < r.Start {
+		return 0
+	}
+	return r.End - r.Start + 1
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func sourceLineSpan(source rag.SourceChunk) int {

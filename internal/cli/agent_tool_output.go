@@ -95,6 +95,9 @@ func newAgentToolPrinter() *agentToolPrinter {
 }
 
 func (p *agentToolPrinter) printEvent(w io.Writer, event falken.Event) {
+	if event.Type == falken.EventThought && strings.HasPrefix(event.Text, "agent ") {
+		fmt.Fprintln(w, event.Text)
+	}
 	if event.ToolCall != nil {
 		fmt.Fprintf(w, "agent tool call: %s %s\n", event.ToolCall.Name, formatAgentToolArguments(event.ToolCall.Arguments))
 	}

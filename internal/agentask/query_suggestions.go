@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/smasonuk/falken-vector/internal/rag"
 )
@@ -47,6 +48,9 @@ func suggestFollowupQueries(question string, sources []rag.SourceChunk, limit in
 	topic := compactQueryTopic(question)
 	queries := make([]string, 0, limit)
 	for _, group := range groups {
+		if purpose == SuggestionPurposeBroadExpansion {
+			group = cleanExpansionGroup(group)
+		}
 		query := normalizeSearchQuery(joinUnique(append([]string{topic}, group...)))
 		if query == "" || !materiallyDifferentQuery(query, question) {
 			continue
@@ -257,6 +261,104 @@ func usefulExpansionGroup(group []string) bool {
 		highSignalTermCount(joined) > 0
 }
 
+func cleanExpansionGroup(group []string) []string {
+	out := make([]string, 0, len(group))
+	for _, term := range group {
+		term = strings.Trim(term, " \t\r\n.,:;()[]{}")
+		if term == "" {
+			continue
+		}
+		words := strings.Fields(term)
+		if len(words) > 1 {
+			cleanedWords := make([]string, 0, len(words))
+			for _, word := range words {
+				if usefulExpansionTerm(word) {
+					cleanedWords = append(cleanedWords, word)
+				}
+			}
+			if len(cleanedWords) != 0 {
+				out = append(out, strings.Join(cleanedWords, " "))
+			}
+			continue
+		}
+		if usefulExpansionTerm(term) {
+			out = append(out, term)
+		}
+	}
+	return uniqueTerms(out)
+}
+
+func usefulExpansionTerm(term string) bool {
+	term = strings.Trim(term, " \t\r\n.,:;()[]{}")
+	if term == "" {
+		return false
+	}
+	if isKnownTechnicalToken(term) {
+		return true
+	}
+	if isNumericNoiseToken(term) || isUnknownAllCapsNoise(term) {
+		return false
+	}
+	return usefulSuggestionTerm(term, "")
+}
+
+func isKnownTechnicalToken(token string) bool {
+	normalized := strings.ToLower(strings.Trim(token, " \t\r\n.,:;()[]{}"))
+	if normalized == "" {
+		return false
+	}
+	if _, ok := highSignalExpansionTokens[normalized]; ok {
+		return true
+	}
+	for _, phrase := range highSignalExpansionPhrases {
+		if normalized == phrase {
+			return true
+		}
+	}
+	return false
+}
+
+func isNumericNoiseToken(token string) bool {
+	token = strings.Trim(token, " \t\r\n.,:;()[]{}")
+	if token == "" {
+		return false
+	}
+	digits := 0
+	for _, r := range token {
+		if unicode.IsDigit(r) {
+			digits++
+			continue
+		}
+		if r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return digits > 0
+}
+
+func isUnknownAllCapsNoise(token string) bool {
+	token = strings.Trim(token, " \t\r\n.,:;()[]{}")
+	if token == "" || isKnownTechnicalToken(token) {
+		return false
+	}
+	hasLetter := false
+	for _, r := range token {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			if !unicode.IsUpper(r) {
+				return false
+			}
+			continue
+		}
+		if unicode.IsDigit(r) || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return hasLetter && len(token) >= 2
+}
+
 func usefulExpansionQuery(query string, originalQuestion string) bool {
 	query = normalizeSearchQuery(query)
 	if query == "" || !materiallyDifferentQuery(query, originalQuestion) {
@@ -344,7 +446,7 @@ func highSignalTermCount(value string) int {
 		}
 	}
 	for _, token := range allCapsTokenPattern.FindAllString(value, -1) {
-		if len(token) >= 3 {
+		if isKnownTechnicalToken(token) {
 			count++
 		}
 	}
@@ -452,6 +554,7 @@ var highSignalExpansionTokens = map[string]struct{}{
 	"ligand":    {},
 	"metadata":  {},
 	"monomer":   {},
+	"mmseqs":    {},
 	"ncbi":      {},
 	"pdb":       {},
 	"pipeline":  {},

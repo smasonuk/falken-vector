@@ -107,6 +107,39 @@ func TestAgentCoverageNudgeOption(t *testing.T) {
 	}
 }
 
+func TestReadSourceToolOption(t *testing.T) {
+	tests := []struct {
+		name          string
+		policy        ReadSourcePolicy
+		legacyEnabled bool
+		question      string
+		want          bool
+		wantErr       bool
+	}{
+		{name: "default broad auto enables", question: "summarize anything related to AlphaFold", want: true},
+		{name: "default narrow stays disabled", question: "Where is citation validation implemented?", want: false},
+		{name: "auto broad enables", policy: ReadSourcePolicyAuto, question: "overview of AlphaFold", want: true},
+		{name: "on enables", policy: ReadSourcePolicyOn, question: "Where is citation validation implemented?", want: true},
+		{name: "off disables legacy bool", policy: ReadSourcePolicyOff, legacyEnabled: true, question: "summarize AlphaFold", want: false},
+		{name: "legacy bool enables default", legacyEnabled: true, question: "Where is citation validation implemented?", want: true},
+		{name: "invalid errors", policy: ReadSourcePolicy("bogus"), question: "hello", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readSourceToolOption(tt.policy, tt.legacyEnabled, tt.question)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("readSourceToolOption succeeded, want error")
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("readSourceToolOption = %t, %v; want %t, nil", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestEngineConfigFromEnvERejectsInvalidHeaders(t *testing.T) {
 	_, err := EngineConfigFromEnvE(func(key string) string {
 		if key == "FALKENGO_LLM_HEADERS" {

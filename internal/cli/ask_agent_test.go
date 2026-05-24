@@ -239,6 +239,24 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 				"warnings": ["top_k raised to configured floor 12", "different warning"]
 			}`),
 		}})
+		opts.Events(falken.Event{Type: falken.EventThought, Text: "agent thin-source nudge: expanding [source 1]"})
+		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+			ID:        "call-read",
+			Name:      "read_index_source",
+			Arguments: json.RawMessage(`{"source_number":1,"context_lines":20}`),
+		}})
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-read",
+			Name:   "read_index_source",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"status": "ok",
+				"source_number": 1,
+				"path": "alphafold.md",
+				"start_line": 1,
+				"end_line": 20
+			}`),
+		}})
 		return agentask.Result{
 			Answer:             "agent answer",
 			ToolCalls:          []string{"search_index"},
@@ -271,6 +289,14 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "agent thin-source nudge: expanding [source 1]") {
 		t.Fatalf("stderr = %q, want thin-source debug output", stderr)
+	}
+	nudgePos := strings.Index(stderr, "agent thin-source nudge: expanding [source 1]")
+	readPos := strings.Index(stderr, "agent tool call: read_index_source")
+	if nudgePos < 0 || readPos < 0 || nudgePos > readPos {
+		t.Fatalf("stderr = %q, want thin-source nudge before read_index_source call", stderr)
+	}
+	if strings.Count(stderr, "agent thin-source nudge: expanding [source 1]") != 1 {
+		t.Fatalf("stderr = %q, want thin-source nudge printed once", stderr)
 	}
 	if !strings.Contains(stderr, "warning: answer did not cite any source") {
 		t.Fatalf("stderr = %q, want warning", stderr)
@@ -569,6 +595,40 @@ func TestAskAgentSourcesBothPrintsCitedAndAllSources(t *testing.T) {
 	}
 }
 
+func TestAskAgentSourcesBothMarksOtherSourcesCoveredByCitedExpansion(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 11].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 10, Path: "alphafold/meetings/sdb.md", StartLine: 21, EndLine: 26},
+				{SourceNumber: 11, Path: "alphafold/meetings/sdb.md", StartLine: 1, EndLine: 33},
+				{SourceNumber: 12, Path: "alphafold/meetings/sdb.md", StartLine: 30, EndLine: 40},
+				{SourceNumber: 13, Path: "other.md", StartLine: 21, EndLine: 26},
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, "[source 10] alphafold/meetings/sdb.md:21-26  (covered by cited source 11)") {
+		t.Fatalf("output = %q, want covered-source marker", output)
+	}
+	if strings.Contains(output, "[source 12] alphafold/meetings/sdb.md:30-40  (covered") {
+		t.Fatalf("output = %q, partial overlap should not be marked covered", output)
+	}
+	if strings.Contains(output, "[source 13] other.md:21-26  (covered") {
+		t.Fatalf("output = %q, different document should not be marked covered", output)
+	}
+}
+
 func TestAskAgentSourcesAllPrintsRetrievedSources(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
 	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
@@ -642,6 +702,106 @@ func TestAskAgentSourcesAllCanPrintSourceProvenance(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, `introduced by: search_index query="AlphaFold", strategy="broad", rank=4`) {
 		t.Fatalf("output = %q, want provenance line", output)
+	}
+}
+
+func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+			ID:        "call-search",
+			Name:      "search_index",
+			Arguments: json.RawMessage(`{"query":"AlphaFold","strategy":"broad","top_k":8}`),
+		}})
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-search",
+			Name:   "search_index",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"status": "ok",
+				"query": "AlphaFold",
+				"top_k": 12,
+				"seed_query_plan": {"queries": ["AlphaFold"]},
+				"expansion_queries": ["AlphaFold A3M PDB JSON NCBI", "AlphaFold UniProt metadata", "protein folding monomer dimer ligand"],
+				"sources": [{"number":10},{"number":11},{"number":12}],
+				"new_sources": 3,
+				"duplicate_sources": 0,
+				"unique_documents": 1,
+				"retrieval_calls": 3
+			}`),
+		}})
+		opts.Events(falken.Event{Type: falken.EventThought, Text: "agent thin-source nudge: expanding [source 11]"})
+		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+			ID:        "call-read",
+			Name:      "read_index_source",
+			Arguments: json.RawMessage(`{"source_number":11,"context_lines":20}`),
+		}})
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-read",
+			Name:   "read_index_source",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"status": "ok",
+				"source_number": 11,
+				"path": "alphafold/meetings/sdb.md",
+				"start_line": 1,
+				"end_line": 33
+			}`),
+		}})
+		return agentask.Result{
+			Answer: "AlphaFold outputs include A3M, PDB, JSON, NCBI, UniProt metadata, and folding workflow notes [source 11].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 10, Path: "alphafold/meetings/sdb.md", StartLine: 21, EndLine: 26},
+				{SourceNumber: 11, Path: "alphafold/meetings/sdb.md", StartLine: 1, EndLine: 33},
+				{SourceNumber: 12, Path: "science_cloud/info/apis.md", StartLine: 103, EndLine: 103},
+			},
+			ThinSourceNudged: true,
+			ThinSourceWarnings: []string{
+				"thin-source nudge: expanding [source 11]",
+			},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "summarize information on alphafold or anything related to folding", "--agent", "--retrieval", "lexical", "--show-agent-tools"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	stderr := errOut.String()
+	output := out.String()
+	for _, want := range []string{
+		"agent broad expansion queries:",
+		"  1. AlphaFold A3M PDB JSON NCBI",
+		"agent thin-source nudge: expanding [source 11]",
+		"agent tool call: read_index_source",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr = %q, want %q", stderr, want)
+		}
+	}
+	for _, bad := range []string{"these two folders here", "going to it probably", "DVI 000 150"} {
+		if strings.Contains(stderr, bad) || strings.Contains(output, bad) {
+			t.Fatalf("stderr = %q output = %q, leaked noisy fragment %q", stderr, output, bad)
+		}
+	}
+	for _, want := range []string{
+		"Sources cited:",
+		"[source 11] alphafold/meetings/sdb.md:1-33",
+		"Other sources available to the agent:",
+		"[source 10] alphafold/meetings/sdb.md:21-26  (covered by cited source 11)",
+		"Source audit:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+	if strings.Contains(output, "Other sources available to the agent:\n[source 11]") {
+		t.Fatalf("output = %q, cited source repeated in other section", output)
 	}
 }
 

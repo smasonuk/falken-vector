@@ -479,7 +479,8 @@ func TestSearchIndexToolBroadStrategyRejectsTranscriptFragmentsFromAlphaFoldTrac
 		},
 		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
 			chunk := testRetrievedChunk("alphafold-noisy", "alphafold/meetings/sdb.md", `So these two folders here which are shared completed and in progress.
-For example amaranthus is species. Outputs include FASTA, A3M, PDB, error JSON and NCBI tax IDs.
+For example amaranthus is species. The transcript also includes DVI 000 150 near PDB output files.
+Outputs include FASTA, A3M, PDB, error JSON and NCBI tax IDs.
 UniProt metadata tracks monomer, dimer, and ligand workflow notes.`, "indexed")
 			return rag.RetrieveResult{
 				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
@@ -493,7 +494,7 @@ UniProt metadata tracks monomer, dimer, and ligand workflow notes.`, "indexed")
 	}
 	payload := decodeSearchPayload(t, result.Payload)
 	got := strings.ToLower(strings.Join(payload.ExpansionQueries, "\n"))
-	for _, bad := range []string{"these two folders here", "for example", "amaranthus", "species"} {
+	for _, bad := range []string{"these two folders here", "for example", "amaranthus", "species", "dvi", "000", "150"} {
 		if strings.Contains(got, bad) {
 			t.Fatalf("expansion queries = %+v, leaked transcript fragment %q", payload.ExpansionQueries, bad)
 		}

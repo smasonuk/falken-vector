@@ -321,6 +321,11 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		emitter.emitError(EventRunFailed, err)
 		return Answer{}, err
 	}
+	readSourceTool, err := readSourceToolOption(request.ReadSourcePolicy, request.ReadSourceTool, request.Question)
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return Answer{}, err
+	}
 	result, err := agentask.Run(ctx, agentask.Options{
 		Question:                 request.Question,
 		Paths:                    e.paths,
@@ -339,7 +344,7 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		CoverageNudge:            coverageNudge,
 		MinBroadSearchCalls:      request.MinAgentSearches,
 		MaxCoverageRetries:       request.MaxCoverageRetries,
-		EnableReadSourceTool:     request.ReadSourceTool,
+		EnableReadSourceTool:     readSourceTool,
 		Events: func(event falken.Event) {
 			converted := convertFalkenEvent(event)
 			if converted.Type == EventRunCompleted || converted.Type == EventRunFailed {
@@ -729,6 +734,22 @@ func agentCoverageNudgeOption(policy AgentCoveragePolicy) (*bool, error) {
 		return &value, nil
 	default:
 		return nil, fmt.Errorf("invalid agent coverage policy %q", policy)
+	}
+}
+
+func readSourceToolOption(policy ReadSourcePolicy, legacyEnabled bool, question string) (bool, error) {
+	switch policy {
+	case ReadSourcePolicyDefault, ReadSourcePolicyAuto:
+		if legacyEnabled {
+			return true, nil
+		}
+		return agentask.IsBroadQuestion(question), nil
+	case ReadSourcePolicyOn:
+		return true, nil
+	case ReadSourcePolicyOff:
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid read source policy %q", policy)
 	}
 }
 

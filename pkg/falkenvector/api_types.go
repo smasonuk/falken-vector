@@ -112,6 +112,15 @@ const (
 	AgentCoverageOn      AgentCoveragePolicy = "on"
 )
 
+type ReadSourcePolicy string
+
+const (
+	ReadSourcePolicyDefault ReadSourcePolicy = ""
+	ReadSourcePolicyAuto    ReadSourcePolicy = "auto"
+	ReadSourcePolicyOn      ReadSourcePolicy = "on"
+	ReadSourcePolicyOff     ReadSourcePolicy = "off"
+)
+
 // AskRequest asks the engine to answer a question.
 //
 // Retrieval overrides engine defaults for this call. Agent enables the tool
@@ -119,7 +128,9 @@ const (
 // MaxToolTopK, and MaxAgentExpansionQueries use agent defaults when zero.
 // AgentCoverage controls the default broad-question coverage nudge, which asks
 // the agent to perform additional searches for exploratory questions.
-// ReadSourceTool is off by default.
+// ReadSourcePolicy controls read_index_source in agent mode. Default/auto enables
+// it for broad questions. ReadSourceTool is preserved for compatibility and acts
+// like ReadSourcePolicyOn unless ReadSourcePolicyOff is set.
 type AskRequest struct {
 	Question string
 
@@ -142,7 +153,8 @@ type AskRequest struct {
 	MinAgentSearches   int
 	MaxCoverageRetries int
 
-	ReadSourceTool bool
+	ReadSourceTool   bool
+	ReadSourcePolicy ReadSourcePolicy
 }
 
 // Answer is the structured answer returned by Ask.

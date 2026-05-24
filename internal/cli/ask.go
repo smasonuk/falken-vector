@@ -145,7 +145,6 @@ func newAskCommand(opts *options) *cobra.Command {
 				}
 				if showAgentTools {
 					printCoverageWarnings(cmd.ErrOrStderr(), result.CoverageWarnings)
-					printThinSourceWarnings(cmd.ErrOrStderr(), result.ThinSourceWarnings)
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
 				printAnswerWithSourceMode(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode, showSourceProvenance)
@@ -277,7 +276,7 @@ func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, 
 		} else if len(sources) != 0 {
 			fmt.Fprintln(w, "No cited sources.")
 		}
-		printSourcesWithHeadingAndProvenance(w, "Other sources available to the agent:", uncitedSourcesOnly(answer, sources), showProvenance)
+		printOtherSourcesWithCoverage(w, answer, sources, showProvenance)
 		printSourceAudit(w, answer, sources)
 	}
 }
@@ -311,11 +310,31 @@ func printAllSourcesWithCitationMarkers(w io.Writer, answer string, sources []ra
 		return
 	}
 	citedSet := citedSourceNumberSet(answer)
+	cited := citedSourcesOnly(answer, sources)
 	fmt.Fprintln(w, "Sources available to the agent:")
 	for _, source := range sources {
 		ref := SourceReference(source)
 		if _, ok := citedSet[source.SourceNumber]; ok {
 			ref += "  (cited)"
+		} else if coveredBy, ok := coveredByCitedSource(source, cited); ok {
+			ref += fmt.Sprintf("  (covered by cited source %d)", coveredBy)
+		}
+		fmt.Fprintln(w, ref)
+		printSourceProvenance(w, source, showProvenance)
+	}
+}
+
+func printOtherSourcesWithCoverage(w io.Writer, answer string, sources []rag.SourceChunk, showProvenance bool) {
+	other := uncitedSourcesOnly(answer, sources)
+	if len(other) == 0 {
+		return
+	}
+	cited := citedSourcesOnly(answer, sources)
+	fmt.Fprintln(w, "Other sources available to the agent:")
+	for _, source := range other {
+		ref := SourceReference(source)
+		if coveredBy, ok := coveredByCitedSource(source, cited); ok {
+			ref += fmt.Sprintf("  (covered by cited source %d)", coveredBy)
 		}
 		fmt.Fprintln(w, ref)
 		printSourceProvenance(w, source, showProvenance)
@@ -386,6 +405,36 @@ func uncitedSourcesOnly(answer string, sources []rag.SourceChunk) []rag.SourceCh
 	return out
 }
 
+func coveredByCitedSource(source rag.SourceChunk, cited []rag.SourceChunk) (int, bool) {
+	if source.StartLine <= 0 || source.EndLine <= 0 || source.EndLine < source.StartLine {
+		return 0, false
+	}
+	for _, citedSource := range cited {
+		if source.SourceNumber == citedSource.SourceNumber {
+			continue
+		}
+		if citedSource.StartLine <= 0 || citedSource.EndLine <= 0 || citedSource.EndLine < citedSource.StartLine {
+			continue
+		}
+		if !sameSourceDocument(source, citedSource) {
+			continue
+		}
+		if source.StartLine >= citedSource.StartLine && source.EndLine <= citedSource.EndLine {
+			return citedSource.SourceNumber, true
+		}
+	}
+	return 0, false
+}
+
+func sameSourceDocument(a, b rag.SourceChunk) bool {
+	if strings.TrimSpace(a.Path) != "" && a.Path == b.Path {
+		return true
+	}
+	aDisplay := rag.DisplayPath(a.Path, a.SourceRoot)
+	bDisplay := rag.DisplayPath(b.Path, b.SourceRoot)
+	return aDisplay != "" && aDisplay == bDisplay
+}
+
 func citedSourceNumberSet(answer string) map[int]struct{} {
 	cited := rag.ExtractCitedSourceNumbers(answer)
 	out := make(map[int]struct{}, len(cited))
@@ -396,12 +445,6 @@ func citedSourceNumberSet(answer string) map[int]struct{} {
 }
 
 func printCoverageWarnings(w io.Writer, warnings []string) {
-	for _, warning := range warnings {
-		fmt.Fprintf(w, "agent %s\n", warning)
-	}
-}
-
-func printThinSourceWarnings(w io.Writer, warnings []string) {
 	for _, warning := range warnings {
 		fmt.Fprintf(w, "agent %s\n", warning)
 	}

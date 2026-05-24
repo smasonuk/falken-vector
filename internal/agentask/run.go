@@ -172,6 +172,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 				return result, nil
 			}
 			result.ThinSourceWarnings = append(result.ThinSourceWarnings, thinSourceNudgeWarning(thinDecision.SourceNumbers))
+			emitAgentNote(opts.Events, "agent "+thinSourceNudgeWarning(thinDecision.SourceNumbers))
 			retryAnswer, err := agent.Run(ctx, thinSourceNudgePrompt(thinDecision.SourceNumbers, thinDecision.ContextLines))
 			if err != nil {
 				result.ThinSourceWarnings = append(result.ThinSourceWarnings, "thin-source nudge failed: "+err.Error())
@@ -307,6 +308,14 @@ func answerAcknowledgesNoSupport(answer string) bool {
 		}
 	}
 	return false
+}
+
+func emitAgentNote(events falken.EventSink, text string) {
+	text = strings.TrimSpace(text)
+	if events == nil || text == "" {
+		return
+	}
+	events(falken.Event{Type: falken.EventThought, Text: text})
 }
 
 func normalizeAgentCitationPolicy(policy rag.CitationPolicy) rag.CitationPolicy {

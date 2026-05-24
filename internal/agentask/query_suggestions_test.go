@@ -86,6 +86,38 @@ For example amaranthus is species. Outputs include FASTA, A3M, PDB, error JSON a
 	}
 }
 
+func TestSuggestFollowupQueriesRejectsNumericOCRNoise(t *testing.T) {
+	queries := SuggestFollowupQueries("protein folding", []rag.SourceChunk{{
+		Path: "alphafold/meetings/sdb.md",
+		Text: `The notes mention DVI 000 150 and PDB output files. Error JSON and A3M are important.`,
+	}}, 3)
+
+	got := strings.Join(queries, "\n")
+	if strings.Contains(got, "DVI") || strings.Contains(got, "000") || strings.Contains(got, "150") {
+		t.Fatalf("queries = %+v, leaked numeric/OCR noise", queries)
+	}
+	for _, want := range []string{"PDB", "JSON", "A3M"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("queries = %+v, want %q", queries, want)
+		}
+	}
+}
+
+func TestCleanExpansionGroupKeepsKnownTermsAndDropsOCRNoise(t *testing.T) {
+	cleaned := cleanExpansionGroup([]string{"DVI", "000", "150", "PDB", "MMseqs"})
+	got := strings.Join(cleaned, " ")
+	for _, bad := range []string{"DVI", "000", "150"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("cleaned = %+v, leaked %q", cleaned, bad)
+		}
+	}
+	for _, want := range []string{"PDB", "MMseqs"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cleaned = %+v, want %q", cleaned, want)
+		}
+	}
+}
+
 func TestUsefulExpansionQueryQualityGate(t *testing.T) {
 	accepted := []string{
 		"AlphaFold A3M PDB JSON",

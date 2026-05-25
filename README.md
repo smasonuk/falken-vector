@@ -183,11 +183,12 @@ Source audit:
 
 `read_index_source` is an optional agent tool for expanding context around an already returned source number. It cannot read arbitrary paths: the agent must pass a registered `source_number`, and `context_lines` defaults to 20 and caps at 100. Broad summary questions auto-enable the tool unless `--no-agent-read-source-tool` is set; `--agent-read-source-tool` enables it explicitly. Expanded ranges broaden the existing source number so final citations keep pointing at `[source N]`.
 
-Use `--read-source-overlap-policy skip|merge|allow` to control overlapping reads. Broad agent summaries default to `merge` unless explicitly overridden; other agent questions default to `skip`. `skip` avoids exact or mostly covered duplicate reads, `merge` broadens the first expanded source when a later overlapping read adds useful lines, and `allow` always performs the read and returns separate expanded context. Debug output reports `already covered`, `merged`, or `merge skipped` decisions, for example when `[source 2]` is already covered by expanded `[source 11]`.
+Use `--read-source-overlap-policy skip|merge|allow` to control overlapping reads. Broad agent summaries default to `merge` unless explicitly overridden; other agent questions default to `skip`. `skip` avoids exact or mostly covered duplicate reads, `merge` broadens the first expanded source when a later overlapping read adds useful lines, and `allow` always performs the read and returns separate expanded context. `--max-merged-read-source-lines` caps merged source ranges and defaults to 300 lines; if a merge would exceed the cap, the tool returns `merge_too_large` and asks the agent to choose a narrower read. Debug output reports `already covered`, `merged`, or `merge skipped` decisions, for example when `[source 2]` is already covered by expanded `[source 11]`.
 
 ```bash
 falkengo ask --agent "summarize anything related to AlphaFold" \
   --read-source-overlap-policy merge \
+  --max-merged-read-source-lines 300 \
   --show-agent-tools
 ```
 

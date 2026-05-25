@@ -41,6 +41,7 @@ func newAskCommand(opts *options) *cobra.Command {
 	var agentReadSourceTool bool
 	var noAgentReadSourceTool bool
 	var readSourceOverlapPolicy string
+	var maxMergedReadSourceLines int
 	var maxAgentSearches int
 	var maxAgentExpansionQueries int
 	var maxAgentRetrievals int
@@ -104,6 +105,9 @@ func newAskCommand(opts *options) *cobra.Command {
 				if maxAgentRetrievals < 0 {
 					return errors.New("--max-agent-retrievals must be >= 0")
 				}
+				if maxMergedReadSourceLines < 0 {
+					return errors.New("--max-merged-read-source-lines must be >= 0")
+				}
 				effectiveReadSourceTool, err := agentReadSourceToolFromFlags(agentReadSourceTool, noAgentReadSourceTool, cmd.Flags().Changed("agent-read-source-tool"), args[0])
 				if err != nil {
 					return err
@@ -137,6 +141,7 @@ func newAskCommand(opts *options) *cobra.Command {
 					MaxCoverageRetries:       maxAgentCoverageRetries,
 					EnableReadSourceTool:     effectiveReadSourceTool,
 					ReadSourceOverlapPolicy:  overlapPolicy,
+					MaxMergedReadSourceLines: maxMergedReadSourceLines,
 				}
 				if showAgentTools {
 					toolPrinter := newAgentToolPrinter()
@@ -248,6 +253,7 @@ func newAskCommand(opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&agentReadSourceTool, "agent-read-source-tool", false, "enable the read_index_source tool in agent mode")
 	cmd.Flags().BoolVar(&noAgentReadSourceTool, "no-agent-read-source-tool", false, "disable automatic read_index_source use in agent mode")
 	cmd.Flags().StringVar(&readSourceOverlapPolicy, "read-source-overlap-policy", "skip", "read_index_source overlap handling: skip, merge, or allow")
+	cmd.Flags().IntVar(&maxMergedReadSourceLines, "max-merged-read-source-lines", 300, "maximum line span for merged read_index_source ranges; 0 uses the default")
 	addRetrievalFlags(cmd, &retrievalFlags)
 	addSourceFilterFlags(cmd, &sourceFlags)
 	return cmd
@@ -472,7 +478,7 @@ func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk, sho
 			fmt.Fprintf(w, "- read source merges: %d\n", metrics.ReadSourceMerges)
 		}
 		if metrics.ReadSourceMergeTooLarge > 0 {
-			fmt.Fprintf(w, "- read source merges skipped: %d\n", metrics.ReadSourceMergeTooLarge)
+			fmt.Fprintf(w, "- read source merge too large: %d\n", metrics.ReadSourceMergeTooLarge)
 		}
 	}
 	if showProvenanceSummary {

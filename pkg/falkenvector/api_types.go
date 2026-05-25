@@ -168,6 +168,9 @@ type AskRequest struct {
 	ReadSourceTool          bool
 	ReadSourcePolicy        ReadSourcePolicy
 	ReadSourceOverlapPolicy ReadSourceOverlapPolicy
+	// MaxMergedReadSourceLines caps merged read_index_source ranges.
+	// Zero uses the agent default.
+	MaxMergedReadSourceLines int
 }
 
 // Answer is the structured answer returned by Ask.

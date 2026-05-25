@@ -332,12 +332,32 @@ func TestAskAgentPassesCoverageAndReadSourceFlags(t *testing.T) {
 		if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapMerge {
 			t.Fatalf("ReadSourceOverlapPolicy = %q, want merge", opts.ReadSourceOverlapPolicy)
 		}
+		if opts.MaxMergedReadSourceLines != 120 {
+			t.Fatalf("MaxMergedReadSourceLines = %d, want 120", opts.MaxMergedReadSourceLines)
+		}
 		return agentask.Result{Answer: "agent answer"}
 	})
 	defer restore()
 
 	cmd := NewRootCommand()
-	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-coverage-nudge", "--min-agent-searches", "3", "--max-agent-coverage-retries", "2", "--agent-read-source-tool", "--read-source-overlap-policy", "merge"})
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-coverage-nudge", "--min-agent-searches", "3", "--max-agent-coverage-retries", "2", "--agent-read-source-tool", "--read-source-overlap-policy", "merge", "--max-merged-read-source-lines", "120"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentPassesDefaultMaxMergedReadSourceLines(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.MaxMergedReadSourceLines != 300 {
+			t.Fatalf("MaxMergedReadSourceLines = %d, want CLI default 300", opts.MaxMergedReadSourceLines)
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -356,6 +376,22 @@ func TestAskAgentReadSourceOverlapPolicyInvalid(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--read-source-overlap-policy must be skip, merge, or allow") {
 		t.Fatalf("Execute error = %v, want overlap policy validation", err)
+	}
+}
+
+func TestAskAgentMaxMergedReadSourceLinesInvalid(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		t.Fatal("runAgentAsk should not be called when max merged read-source lines is invalid")
+		return agentask.Result{}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--max-merged-read-source-lines", "-1"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--max-merged-read-source-lines must be >= 0") {
+		t.Fatalf("Execute error = %v, want max merged read-source validation", err)
 	}
 }
 
@@ -835,11 +871,75 @@ func TestAskAgentSourceAuditPrintsReadSourceOverlapTotals(t *testing.T) {
 		"- read source overlap policy: merge",
 		"- read source already covered: 1",
 		"- read source merges: 1",
-		"- read source merges skipped: 1",
+		"- read source merge too large: 1",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want %q", output, want)
 		}
+	}
+}
+
+func TestAskAgentSourceAuditPrintsReadSourceCallsWithoutOverlapDecisions(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 1].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "one.go", StartLine: 1, EndLine: 100},
+			},
+			ReadSourceCalls:         2,
+			ReadSourceOverlapPolicy: "merge",
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"- read source calls: 2",
+		"- read source overlap policy: merge",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+	for _, bad := range []string{
+		"read source already covered",
+		"read source merges:",
+		"read source merge too large",
+	} {
+		if strings.Contains(output, bad) {
+			t.Fatalf("output = %q, did not want %q", output, bad)
+		}
+	}
+}
+
+func TestAskAgentSourceAuditOmitsReadSourceLinesWithoutCalls(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer:  "agent answer [source 1].",
+			Sources: []rag.SourceChunk{{SourceNumber: 1, Path: "one.go", StartLine: 1, EndLine: 2}},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	if strings.Contains(output, "read source calls") || strings.Contains(output, "read source overlap policy") {
+		t.Fatalf("output = %q, want read-source audit lines omitted", output)
 	}
 }
 
@@ -944,6 +1044,12 @@ func TestAskAgentSourceAuditOmitsQueryCountsWithoutDebug(t *testing.T) {
 func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
 	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapMerge {
+			t.Fatalf("ReadSourceOverlapPolicy = %q, want broad default merge", opts.ReadSourceOverlapPolicy)
+		}
+		if opts.MaxMergedReadSourceLines != 300 {
+			t.Fatalf("MaxMergedReadSourceLines = %d, want CLI default 300", opts.MaxMergedReadSourceLines)
+		}
 		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
 			ID:        "call-search",
 			Name:      "search_index",
@@ -958,12 +1064,36 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 				"query": "AlphaFold",
 				"top_k": 12,
 				"seed_query_plan": {"queries": ["AlphaFold"]},
-				"expansion_queries": ["AlphaFold A3M PDB JSON NCBI", "AlphaFold UniProt metadata", "protein folding monomer dimer ligand"],
+				"expansion_queries": ["AlphaFold A3M PDB JSON NCBI", "AlphaFold species NCBI", "protein folding PDB error JSON"],
 				"sources": [{"number":10},{"number":11},{"number":12}],
 				"new_sources": 3,
 				"duplicate_sources": 0,
 				"unique_documents": 1,
 				"retrieval_calls": 3
+			}`),
+		}})
+		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+			ID:        "call-search-2",
+			Name:      "search_index",
+			Arguments: json.RawMessage(`{"query":"protein folding folding","strategy":"broad","top_k":5}`),
+		}})
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-search-2",
+			Name:   "search_index",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"status": "ok",
+				"query": "protein folding",
+				"original_query": "protein folding folding",
+				"query_normalized": true,
+				"top_k": 12,
+				"seed_query_plan": {"queries": ["protein folding"]},
+				"expansion_queries": ["protein folding PDB error JSON"],
+				"sources": [{"number":12}],
+				"new_sources": 1,
+				"duplicate_sources": 0,
+				"unique_documents": 1,
+				"retrieval_calls": 2
 			}`),
 		}})
 		opts.Events(falken.Event{Type: falken.EventThought, Text: "agent thin-source nudge: expanding [source 11]"})
@@ -995,6 +1125,10 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 			ThinSourceWarnings: []string{
 				"thin-source nudge: expanding [source 11]",
 			},
+			SearchToolCalls:         2,
+			RetrievalCalls:          5,
+			ReadSourceCalls:         1,
+			ReadSourceOverlapPolicy: "merge",
 		}
 	})
 	defer restore()
@@ -1013,6 +1147,9 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 	for _, want := range []string{
 		"agent broad expansion queries:",
 		"  1. AlphaFold A3M PDB JSON NCBI",
+		"  2. AlphaFold species NCBI",
+		"  3. protein folding PDB error JSON",
+		`query="protein folding" (normalized from "protein folding folding")`,
 		"top_k=12",
 		"agent thin-source nudge: expanding [source 11]",
 		"agent tool call: read_index_source",
@@ -1021,7 +1158,7 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 			t.Fatalf("stderr = %q, want %q", stderr, want)
 		}
 	}
-	for _, bad := range []string{"these two folders here", "going to it probably", "DVI 000 150", "got any metadata what was used run", "[sources"} {
+	for _, bad := range []string{"these two folders here", "going to it probably", "DVI 000 150", "got any metadata what was used run", "[sources", "[source 2, 3]"} {
 		if strings.Contains(stderr, bad) || strings.Contains(output, bad) {
 			t.Fatalf("stderr = %q output = %q, leaked noisy fragment %q", stderr, output, bad)
 		}
@@ -1032,6 +1169,10 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 		"Other sources available to the agent:",
 		"[source 10] alphafold/meetings/sdb.md:21-26  (covered by cited source 11)",
 		"Source audit:",
+		"- search tool calls: 2",
+		"- retrieval calls: 5",
+		"- read source calls: 1",
+		"- read source overlap policy: merge",
 		"- introduced by query:",
 		"  - AlphaFold: 2",
 	} {

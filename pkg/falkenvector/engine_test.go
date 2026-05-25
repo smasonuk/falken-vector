@@ -171,6 +171,33 @@ func TestReadSourceOverlapPolicyOption(t *testing.T) {
 	}
 }
 
+func TestMaxMergedReadSourceLinesOption(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		want    int
+		wantErr bool
+	}{
+		{name: "default", value: 0, want: 0},
+		{name: "explicit", value: 120, want: 120},
+		{name: "invalid", value: -1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := maxMergedReadSourceLinesOption(tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("maxMergedReadSourceLinesOption succeeded, want error")
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("maxMergedReadSourceLinesOption = %d, %v; want %d, nil", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestEngineConfigFromEnvERejectsInvalidHeaders(t *testing.T) {
 	_, err := EngineConfigFromEnvE(func(key string) string {
 		if key == "FALKENGO_LLM_HEADERS" {

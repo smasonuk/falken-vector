@@ -331,6 +331,11 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		emitter.emitError(EventRunFailed, err)
 		return Answer{}, err
 	}
+	maxMergedReadSourceLines, err := maxMergedReadSourceLinesOption(request.MaxMergedReadSourceLines)
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return Answer{}, err
+	}
 	result, err := agentask.Run(ctx, agentask.Options{
 		Question:                 request.Question,
 		Paths:                    e.paths,
@@ -351,6 +356,7 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		MaxCoverageRetries:       request.MaxCoverageRetries,
 		EnableReadSourceTool:     readSourceTool,
 		ReadSourceOverlapPolicy:  readSourceOverlapPolicy,
+		MaxMergedReadSourceLines: maxMergedReadSourceLines,
 		Events: func(event falken.Event) {
 			converted := convertFalkenEvent(event)
 			if converted.Type == EventRunCompleted || converted.Type == EventRunFailed {
@@ -775,6 +781,13 @@ func readSourceOverlapPolicyOption(policy ReadSourceOverlapPolicy, question stri
 	default:
 		return "", fmt.Errorf("invalid read source overlap policy %q", policy)
 	}
+}
+
+func maxMergedReadSourceLinesOption(value int) (int, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("max merged read source lines must be >= 0")
+	}
+	return value, nil
 }
 
 func publicRetrievedChunks(chunks []rag.RetrievedChunk, config ObservabilityConfig, rawText bool) []RetrievedChunk {

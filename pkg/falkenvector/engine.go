@@ -326,7 +326,7 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		emitter.emitError(EventRunFailed, err)
 		return Answer{}, err
 	}
-	readSourceOverlapPolicy, err := readSourceOverlapPolicyOption(request.ReadSourceOverlapPolicy)
+	readSourceOverlapPolicy, err := readSourceOverlapPolicyOption(request.ReadSourceOverlapPolicy, request.Question)
 	if err != nil {
 		emitter.emitError(EventRunFailed, err)
 		return Answer{}, err
@@ -759,9 +759,14 @@ func readSourceToolOption(policy ReadSourcePolicy, legacyEnabled bool, question 
 	}
 }
 
-func readSourceOverlapPolicyOption(policy ReadSourceOverlapPolicy) (agentask.ReadSourceOverlapPolicy, error) {
+func readSourceOverlapPolicyOption(policy ReadSourceOverlapPolicy, question string) (agentask.ReadSourceOverlapPolicy, error) {
 	switch policy {
-	case ReadSourceOverlapDefault, ReadSourceOverlapSkip:
+	case ReadSourceOverlapDefault:
+		if agentask.IsBroadQuestion(question) {
+			return agentask.ReadSourceOverlapMerge, nil
+		}
+		return agentask.ReadSourceOverlapSkip, nil
+	case ReadSourceOverlapSkip:
 		return agentask.ReadSourceOverlapSkip, nil
 	case ReadSourceOverlapMerge:
 		return agentask.ReadSourceOverlapMerge, nil
@@ -846,20 +851,25 @@ func answerFromAgent(result agentask.Result) Answer {
 	available := publicSources(result.Sources)
 	cited := publicSources(citedSourceChunks(answer, result.Sources))
 	return Answer{
-		Text:               answer,
-		Sources:            available,
-		CitedSources:       cited,
-		AvailableSources:   available,
-		CitationWarnings:   append([]string(nil), result.CitationWarnings...),
-		CitationValid:      result.CitationValid,
-		CoverageWarnings:   append([]string(nil), result.CoverageWarnings...),
-		CoverageNudged:     result.CoverageNudged,
-		ThinSourceWarnings: append([]string(nil), result.ThinSourceWarnings...),
-		ThinSourceNudged:   result.ThinSourceNudged,
-		Retried:            result.Retried,
-		SearchToolCalls:    result.SearchToolCalls,
-		RetrievalCalls:     result.RetrievalCalls,
-		ToolCalls:          calls,
+		Text:                     answer,
+		Sources:                  available,
+		CitedSources:             cited,
+		AvailableSources:         available,
+		CitationWarnings:         append([]string(nil), result.CitationWarnings...),
+		CitationValid:            result.CitationValid,
+		CoverageWarnings:         append([]string(nil), result.CoverageWarnings...),
+		CoverageNudged:           result.CoverageNudged,
+		ThinSourceWarnings:       append([]string(nil), result.ThinSourceWarnings...),
+		ThinSourceNudged:         result.ThinSourceNudged,
+		Retried:                  result.Retried,
+		SearchToolCalls:          result.SearchToolCalls,
+		RetrievalCalls:           result.RetrievalCalls,
+		ReadSourceCalls:          result.ReadSourceCalls,
+		ReadSourceOverlapPolicy:  result.ReadSourceOverlapPolicy,
+		ReadSourceAlreadyCovered: result.ReadSourceAlreadyCovered,
+		ReadSourceMerges:         result.ReadSourceMerges,
+		ReadSourceMergeTooLarge:  result.ReadSourceMergeTooLarge,
+		ToolCalls:                calls,
 	}
 }
 

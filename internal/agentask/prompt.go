@@ -24,7 +24,9 @@ read_index_source only accepts source numbers already returned by search_index.
 For broad summaries, if a relevant source covers only one or two lines, or several relevant sources come from the same document, call read_index_source before finalizing.
 If several relevant sources are close together in the same document, read one representative source with enough context rather than reading each source separately.
 Avoid calling read_index_source for multiple sources from the same document if their expanded line ranges would largely overlap.
-Continue citing the original [source N] after reading expanded context.`
+For a normal expansion, continue citing the original [source N].
+If read_index_source says the requested source is already covered by another source, cite the covering source number returned by the tool.
+If read_index_source says the requested source was merged into another expanded source, cite the merged or covering source number returned by the tool.`
 
 func agentSystemPrompt(enableReadSourceTool bool) string {
 	if enableReadSourceTool {

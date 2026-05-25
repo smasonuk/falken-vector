@@ -15,6 +15,9 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 	defer func() {
 		if err == nil {
 			populateResultToolMetrics(&final)
+			if final.ReadSourceCalls > 0 {
+				final.ReadSourceOverlapPolicy = string(normalizeReadSourceOverlapPolicy(opts.ReadSourceOverlapPolicy))
+			}
 		}
 	}()
 	if strings.TrimSpace(opts.Question) == "" {
@@ -38,6 +41,9 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 	if opts.MaxToolTopK <= 0 {
 		opts.MaxToolTopK = 20
 	}
+	if opts.ReadSourceOverlapPolicy == ReadSourceOverlapDefault {
+		opts.ReadSourceOverlapPolicy = ReadSourceOverlapSkip
+	}
 	coveragePolicy := normalizeCoveragePolicy(opts)
 	thinPolicy := normalizeThinSourcePolicy(opts)
 
@@ -60,8 +66,9 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 	agentTools := []falken.Tool{searchTool}
 	if opts.EnableReadSourceTool {
 		agentTools = append(agentTools, NewReadIndexSourceTool(ReadSourceToolOptions{
-			Registry:      registry,
-			OverlapPolicy: opts.ReadSourceOverlapPolicy,
+			Registry:                 registry,
+			OverlapPolicy:            opts.ReadSourceOverlapPolicy,
+			MaxMergedReadSourceLines: opts.MaxMergedReadSourceLines,
 		}))
 	}
 
@@ -257,17 +264,32 @@ func populateResultToolMetrics(result *Result) {
 	if result == nil {
 		return
 	}
-	searchCalls, retrievalCalls := agentToolMetrics(*result)
+	searchCalls, retrievalCalls, readSourceStats := agentToolMetrics(*result)
 	result.SearchToolCalls = searchCalls
 	result.RetrievalCalls = retrievalCalls
+	result.ReadSourceCalls = readSourceStats.Calls
+	result.ReadSourceAlreadyCovered = readSourceStats.AlreadyCovered
+	result.ReadSourceMerges = readSourceStats.Merges
+	result.ReadSourceMergeTooLarge = readSourceStats.MergeTooLarge
 }
 
-func agentToolMetrics(result Result) (int, int) {
+type readSourceMetricStats struct {
+	Calls          int
+	AlreadyCovered int
+	Merges         int
+	MergeTooLarge  int
+}
+
+func agentToolMetrics(result Result) (int, int, readSourceMetricStats) {
 	searchCalls := 0
+	readStats := readSourceMetricStats{}
 	if len(result.Trace.ToolCalls) != 0 {
 		for _, call := range result.Trace.ToolCalls {
 			if call.Name == SearchIndexToolName {
 				searchCalls++
+			}
+			if call.Name == ReadIndexSourceToolName {
+				readStats.Calls++
 			}
 		}
 	} else {
@@ -275,21 +297,42 @@ func agentToolMetrics(result Result) (int, int) {
 			if name == SearchIndexToolName {
 				searchCalls++
 			}
+			if name == ReadIndexSourceToolName {
+				readStats.Calls++
+			}
 		}
 	}
 	retrievalCalls := 0
 	for _, toolResult := range result.Trace.ToolResults {
-		if toolResult.Name != SearchIndexToolName || len(toolResult.Payload) == 0 {
+		if len(toolResult.Payload) == 0 {
 			continue
 		}
-		var payload struct {
-			RetrievalCalls int `json:"retrieval_calls"`
-		}
-		if json.Unmarshal(toolResult.Payload, &payload) == nil {
-			retrievalCalls += payload.RetrievalCalls
+		switch toolResult.Name {
+		case SearchIndexToolName:
+			var payload struct {
+				RetrievalCalls int `json:"retrieval_calls"`
+			}
+			if json.Unmarshal(toolResult.Payload, &payload) == nil {
+				retrievalCalls += payload.RetrievalCalls
+			}
+		case ReadIndexSourceToolName:
+			var payload struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(toolResult.Payload, &payload) != nil {
+				continue
+			}
+			switch payload.Status {
+			case "already_covered":
+				readStats.AlreadyCovered++
+			case "merge_existing":
+				readStats.Merges++
+			case "merge_too_large":
+				readStats.MergeTooLarge++
+			}
 		}
 	}
-	return searchCalls, retrievalCalls
+	return searchCalls, retrievalCalls, readStats
 }
 
 func appendUniqueStrings(values []string, additions ...string) []string {

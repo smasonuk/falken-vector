@@ -361,19 +361,23 @@ func TestAskAgentReadSourceOverlapPolicyInvalid(t *testing.T) {
 
 func TestReadSourceOverlapPolicyFromFlag(t *testing.T) {
 	tests := []struct {
-		value   string
-		want    agentask.ReadSourceOverlapPolicy
-		wantErr bool
+		name     string
+		value    string
+		changed  bool
+		question string
+		want     agentask.ReadSourceOverlapPolicy
+		wantErr  bool
 	}{
-		{value: "", want: agentask.ReadSourceOverlapSkip},
-		{value: "skip", want: agentask.ReadSourceOverlapSkip},
-		{value: "merge", want: agentask.ReadSourceOverlapMerge},
-		{value: "allow", want: agentask.ReadSourceOverlapAllow},
-		{value: "bogus", wantErr: true},
+		{name: "default narrow skip", value: "skip", question: "Where is citation validation implemented?", want: agentask.ReadSourceOverlapSkip},
+		{name: "default broad merge", value: "skip", question: "summarize anything related to AlphaFold", want: agentask.ReadSourceOverlapMerge},
+		{name: "explicit skip broad", value: "skip", changed: true, question: "summarize anything related to AlphaFold", want: agentask.ReadSourceOverlapSkip},
+		{name: "explicit merge", value: "merge", changed: true, want: agentask.ReadSourceOverlapMerge},
+		{name: "explicit allow", value: "allow", changed: true, want: agentask.ReadSourceOverlapAllow},
+		{name: "invalid", value: "bogus", changed: true, wantErr: true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.value, func(t *testing.T) {
-			got, err := readSourceOverlapPolicyFromFlag(tt.value)
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readSourceOverlapPolicyFromFlag(tt.value, tt.changed, tt.question)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("readSourceOverlapPolicyFromFlag succeeded, want error")
@@ -430,12 +434,49 @@ func TestAskAgentAutoEnablesReadSourceForBroadQuestion(t *testing.T) {
 		if !opts.EnableReadSourceTool {
 			t.Fatal("EnableReadSourceTool = false, want broad question auto-enable")
 		}
+		if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapMerge {
+			t.Fatalf("ReadSourceOverlapPolicy = %q, want broad default merge", opts.ReadSourceOverlapPolicy)
+		}
 		return agentask.Result{Answer: "agent answer"}
 	})
 	defer restore()
 
 	cmd := NewRootCommand()
 	cmd.SetArgs([]string{"--state-dir", state, "ask", "summarize anything related to AlphaFold folding", "--agent", "--retrieval", "lexical"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentExplicitReadSourceOverlapSkipOverridesBroadDefault(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapSkip {
+			t.Fatalf("ReadSourceOverlapPolicy = %q, want explicit skip", opts.ReadSourceOverlapPolicy)
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "summarize anything related to AlphaFold folding", "--agent", "--retrieval", "lexical", "--read-source-overlap-policy", "skip"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentNarrowQuestionDefaultsReadSourceOverlapSkip(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapSkip {
+			t.Fatalf("ReadSourceOverlapPolicy = %q, want narrow default skip", opts.ReadSourceOverlapPolicy)
+		}
+		return agentask.Result{Answer: "agent answer"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "Where is citation validation implemented?", "--agent", "--retrieval", "lexical"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -756,6 +797,45 @@ func TestAskAgentSourceAuditPrintsSearchAndRetrievalTotals(t *testing.T) {
 		"- introduced by query:",
 		"  - AlphaFold: 3",
 		"  - protein folding: 2",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestAskAgentSourceAuditPrintsReadSourceOverlapTotals(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 1].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "one.go", StartLine: 1, EndLine: 100},
+				{SourceNumber: 2, Path: "one.go", StartLine: 80, EndLine: 90},
+			},
+			ReadSourceCalls:          3,
+			ReadSourceOverlapPolicy:  "merge",
+			ReadSourceAlreadyCovered: 1,
+			ReadSourceMerges:         1,
+			ReadSourceMergeTooLarge:  1,
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"- read source calls: 3",
+		"- read source overlap policy: merge",
+		"- read source already covered: 1",
+		"- read source merges: 1",
+		"- read source merges skipped: 1",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want %q", output, want)

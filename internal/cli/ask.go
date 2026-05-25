@@ -56,6 +56,9 @@ func newAskCommand(opts *options) *cobra.Command {
 			if err := validateSourcesMode(sourcesMode); err != nil {
 				return err
 			}
+			if err := validateReadSourceOverlapPolicyValue(readSourceOverlapPolicy); err != nil {
+				return err
+			}
 			effectiveSourcesMode := sourcesMode
 			if agentMode && !cmd.Flags().Changed("sources") {
 				effectiveSourcesMode = "both"
@@ -105,7 +108,7 @@ func newAskCommand(opts *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				overlapPolicy, err := readSourceOverlapPolicyFromFlag(readSourceOverlapPolicy)
+				overlapPolicy, err := readSourceOverlapPolicyFromFlag(readSourceOverlapPolicy, cmd.Flags().Changed("read-source-overlap-policy"), args[0])
 				if err != nil {
 					return err
 				}
@@ -157,8 +160,13 @@ func newAskCommand(opts *options) *cobra.Command {
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
 				printAnswerWithSourceModeAndAudit(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode, showSourceProvenance, showAgentTools, sourceAuditMetrics{
-					SearchToolCalls: result.SearchToolCalls,
-					RetrievalCalls:  result.RetrievalCalls,
+					SearchToolCalls:          result.SearchToolCalls,
+					RetrievalCalls:           result.RetrievalCalls,
+					ReadSourceCalls:          result.ReadSourceCalls,
+					ReadSourceAlreadyCovered: result.ReadSourceAlreadyCovered,
+					ReadSourceMerges:         result.ReadSourceMerges,
+					ReadSourceMergeTooLarge:  result.ReadSourceMergeTooLarge,
+					ReadSourceOverlapPolicy:  result.ReadSourceOverlapPolicy,
 				})
 				return nil
 			}
@@ -258,8 +266,13 @@ func printAnswerWithSourceMode(w io.Writer, answer string, sources []rag.SourceC
 }
 
 type sourceAuditMetrics struct {
-	SearchToolCalls int
-	RetrievalCalls  int
+	SearchToolCalls          int
+	RetrievalCalls           int
+	ReadSourceCalls          int
+	ReadSourceAlreadyCovered int
+	ReadSourceMerges         int
+	ReadSourceMergeTooLarge  int
+	ReadSourceOverlapPolicy  string
 }
 
 func printAnswerWithSourceModeAndAudit(w io.Writer, answer string, sources []rag.SourceChunk, sourcesMode string, showProvenance, showAuditProvenance bool, auditMetrics sourceAuditMetrics) {
@@ -447,6 +460,21 @@ func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk, sho
 	if metrics.RetrievalCalls > 0 {
 		fmt.Fprintf(w, "- retrieval calls: %d\n", metrics.RetrievalCalls)
 	}
+	if metrics.ReadSourceCalls > 0 {
+		fmt.Fprintf(w, "- read source calls: %d\n", metrics.ReadSourceCalls)
+		if strings.TrimSpace(metrics.ReadSourceOverlapPolicy) != "" {
+			fmt.Fprintf(w, "- read source overlap policy: %s\n", metrics.ReadSourceOverlapPolicy)
+		}
+		if metrics.ReadSourceAlreadyCovered > 0 {
+			fmt.Fprintf(w, "- read source already covered: %d\n", metrics.ReadSourceAlreadyCovered)
+		}
+		if metrics.ReadSourceMerges > 0 {
+			fmt.Fprintf(w, "- read source merges: %d\n", metrics.ReadSourceMerges)
+		}
+		if metrics.ReadSourceMergeTooLarge > 0 {
+			fmt.Fprintf(w, "- read source merges skipped: %d\n", metrics.ReadSourceMergeTooLarge)
+		}
+	}
 	if showProvenanceSummary {
 		printSourceAuditProvenanceSummary(w, sources)
 	}
@@ -608,9 +636,20 @@ func agentReadSourceToolFromFlags(enable, disable, enableChanged bool, question 
 	return false, nil
 }
 
-func readSourceOverlapPolicyFromFlag(value string) (agentask.ReadSourceOverlapPolicy, error) {
+func readSourceOverlapPolicyFromFlag(value string, changed bool, question string) (agentask.ReadSourceOverlapPolicy, error) {
+	if err := validateReadSourceOverlapPolicyValue(value); err != nil {
+		return "", err
+	}
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "skip":
+	case "":
+		if !changed && agentask.IsBroadQuestion(question) {
+			return agentask.ReadSourceOverlapMerge, nil
+		}
+		return agentask.ReadSourceOverlapSkip, nil
+	case "skip":
+		if !changed && agentask.IsBroadQuestion(question) {
+			return agentask.ReadSourceOverlapMerge, nil
+		}
 		return agentask.ReadSourceOverlapSkip, nil
 	case "merge":
 		return agentask.ReadSourceOverlapMerge, nil
@@ -618,6 +657,15 @@ func readSourceOverlapPolicyFromFlag(value string) (agentask.ReadSourceOverlapPo
 		return agentask.ReadSourceOverlapAllow, nil
 	default:
 		return "", errors.New("--read-source-overlap-policy must be skip, merge, or allow")
+	}
+}
+
+func validateReadSourceOverlapPolicyValue(value string) error {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "skip", "merge", "allow":
+		return nil
+	default:
+		return errors.New("--read-source-overlap-policy must be skip, merge, or allow")
 	}
 }
 

@@ -17,9 +17,10 @@ import (
 const ReadIndexSourceToolName = "read_index_source"
 
 type ReadSourceToolOptions struct {
-	Registry      *CitationRegistry
-	ReadFile      func(string) ([]byte, error)
-	OverlapPolicy ReadSourceOverlapPolicy
+	Registry                 *CitationRegistry
+	ReadFile                 func(string) ([]byte, error)
+	OverlapPolicy            ReadSourceOverlapPolicy
+	MaxMergedReadSourceLines int
 }
 
 type readIndexSourceArgs struct {
@@ -41,6 +42,7 @@ func NewReadIndexSourceTool(opts ReadSourceToolOptions) falken.Tool {
 		opts.ReadFile = os.ReadFile
 	}
 	overlapPolicy := normalizeReadSourceOverlapPolicy(opts.OverlapPolicy)
+	maxMergedLines := normalizeMaxMergedReadSourceLines(opts.MaxMergedReadSourceLines)
 	var expandedMu sync.Mutex
 	expandedSources := map[int]struct{}{}
 	return falken.ToolFunc(readIndexSourceDescriptor(), func(ctx context.Context, invocation falken.ToolInvocation) (falken.ToolExecutionResult, error) {
@@ -99,13 +101,40 @@ func NewReadIndexSourceTool(opts ReadSourceToolOptions) falken.Tool {
 				Payload: marshalReadSourcePayload(payload),
 			}, nil
 		case readSourceOverlapMergeExisting:
-			data, err := opts.ReadFile(decision.CoveringSource.Path)
-			if err != nil {
-				return failedReadSourceToolResult("read_source_failed", fmt.Sprintf("read source %q: %v", decision.CoveringSource.Path, err)), nil
-			}
 			mergedRange := lineRange{
 				Start: minInt(decision.CoveringSource.StartLine, projectedRange.Start),
 				End:   maxInt(decision.CoveringSource.EndLine, projectedRange.End),
+			}
+			if mergedRange.len() > maxMergedLines {
+				payload := readSourcePayload{
+					Success:                  true,
+					Status:                   "merge_too_large",
+					SourceNumber:             source.SourceNumber,
+					CoveredBySourceNumber:    decision.CoveringSource.SourceNumber,
+					Path:                     rag.DisplayPath(source.Path, source.SourceRoot),
+					StartLine:                projectedRange.Start,
+					EndLine:                  projectedRange.End,
+					CoveredByPath:            rag.DisplayPath(decision.CoveringSource.Path, decision.CoveringSource.SourceRoot),
+					CoveredByStartLine:       decision.CoveringSource.StartLine,
+					CoveredByEndLine:         decision.CoveringSource.EndLine,
+					MaxMergedReadSourceLines: maxMergedLines,
+					Warnings:                 warnings,
+				}
+				content := fmt.Sprintf("requested [source %d] overlaps [source %d], but merging would exceed the max merged read range of %d lines.\nChoose a narrower source or fewer context lines.",
+					source.SourceNumber,
+					decision.CoveringSource.SourceNumber,
+					maxMergedLines,
+				)
+				return falken.ToolExecutionResult{
+					Success: true,
+					Status:  "merge_too_large",
+					Content: content,
+					Payload: marshalReadSourcePayload(payload),
+				}, nil
+			}
+			data, err := opts.ReadFile(decision.CoveringSource.Path)
+			if err != nil {
+				return failedReadSourceToolResult("read_source_failed", fmt.Sprintf("read source %q: %v", decision.CoveringSource.Path, err)), nil
 			}
 			text, startLine, endLine := sourceRangeText(string(data), mergedRange.Start, mergedRange.End)
 			if err := opts.Registry.ExpandSource(decision.CoveringSource.SourceNumber, startLine, endLine, text); err != nil {
@@ -236,6 +265,13 @@ func normalizeReadSourceOverlapPolicy(policy ReadSourceOverlapPolicy) ReadSource
 	default:
 		return ReadSourceOverlapSkip
 	}
+}
+
+func normalizeMaxMergedReadSourceLines(value int) int {
+	if value <= 0 {
+		return 300
+	}
+	return value
 }
 
 func sourceContextText(content string, sourceStart, sourceEnd, contextLines int) (string, int, int) {
@@ -443,17 +479,18 @@ func marshalReadSourcePayload(payload readSourcePayload) json.RawMessage {
 }
 
 type readSourcePayload struct {
-	Success               bool     `json:"success"`
-	Status                string   `json:"status"`
-	SourceNumber          int      `json:"source_number,omitempty"`
-	CoveredBySourceNumber int      `json:"covered_by_source_number,omitempty"`
-	Path                  string   `json:"path,omitempty"`
-	StartLine             int      `json:"start_line,omitempty"`
-	EndLine               int      `json:"end_line,omitempty"`
-	CoveredByPath         string   `json:"covered_by_path,omitempty"`
-	CoveredByStartLine    int      `json:"covered_by_start_line,omitempty"`
-	CoveredByEndLine      int      `json:"covered_by_end_line,omitempty"`
-	Text                  string   `json:"text,omitempty"`
-	Warnings              []string `json:"warnings"`
-	Error                 string   `json:"error,omitempty"`
+	Success                  bool     `json:"success"`
+	Status                   string   `json:"status"`
+	SourceNumber             int      `json:"source_number,omitempty"`
+	CoveredBySourceNumber    int      `json:"covered_by_source_number,omitempty"`
+	Path                     string   `json:"path,omitempty"`
+	StartLine                int      `json:"start_line,omitempty"`
+	EndLine                  int      `json:"end_line,omitempty"`
+	CoveredByPath            string   `json:"covered_by_path,omitempty"`
+	CoveredByStartLine       int      `json:"covered_by_start_line,omitempty"`
+	CoveredByEndLine         int      `json:"covered_by_end_line,omitempty"`
+	MaxMergedReadSourceLines int      `json:"max_merged_read_source_lines,omitempty"`
+	Text                     string   `json:"text,omitempty"`
+	Warnings                 []string `json:"warnings"`
+	Error                    string   `json:"error,omitempty"`
 }

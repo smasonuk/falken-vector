@@ -210,3 +210,30 @@ func TestFormatAgentToolResultReadSourceMergeExisting(t *testing.T) {
 		t.Fatalf("lines = %q, want merge summary", got)
 	}
 }
+
+func TestFormatAgentToolResultReadSourceMergeTooLarge(t *testing.T) {
+	lines := formatAgentToolResult(falken.ToolResult{
+		Name: "read_index_source",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "merge_too_large",
+			"source_number": 2,
+			"path": "alphafold/meetings/sdb.md",
+			"start_line": 3,
+			"end_line": 360,
+			"covered_by_source_number": 11,
+			"covered_by_path": "alphafold/meetings/sdb.md",
+			"covered_by_start_line": 1,
+			"covered_by_end_line": 200,
+			"max_merged_read_source_lines": 250,
+			"text": "expanded text that must not leak"
+		}`),
+	})
+	got := strings.Join(lines, "\n")
+	if !strings.Contains(got, "agent tool result: read_index_source ok, merge skipped for [source 2]; merging into [source 11] would exceed max merged read range 250 lines") {
+		t.Fatalf("lines = %q, want merge-too-large summary", got)
+	}
+	if strings.Contains(got, "expanded text") {
+		t.Fatalf("lines = %q, leaked expanded text", got)
+	}
+}

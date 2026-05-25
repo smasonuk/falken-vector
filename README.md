@@ -161,9 +161,35 @@ falkengo ask --agent "summarize information on alphafold or anything related to 
 
 `--show-agent-tools` prints each `agent tool call` and compact `agent tool result` without dumping source text. Search results include `new` sources added by that call, `duplicates` already seen, `docs` touched, and actual `retrievals` performed. Broad searches may also show `agent seed query plan`, `agent broad expansion queries`, and `agent suggested follow-up queries`; if the tool normalizes a repeated-term query, the result shows the normalized query and original text. A `agent thin-source nudge` line means the agent is expanding very short cited spans with `read_index_source` before finalizing.
 
-Agent answers default to `--sources both`: `Sources cited` lists sources referenced by the final answer, while `Other sources available to the agent` shows retrieved but uncited evidence. `Source audit` summarizes available, cited, and uncited counts; when agent search metrics are available it also shows `search tool calls` and `retrieval calls`, and under `--show-agent-tools` can include `introduced by query` counts when provenance is available. Use `--sources cited` for the cited-only view, `--sources all` for every available source in one list, and `--show-source-provenance` to print first-introduced query details per source.
+Agent answers default to `--sources both`: `Sources cited` lists sources referenced by the final answer, while `Other sources available to the agent` shows retrieved but uncited evidence. Use `--sources cited` for the cited-only view, `--sources all` for every available source in one list, and `--show-source-provenance` to print first-introduced query details per source. If an uncited source is fully contained by an expanded cited range, it is marked as covered by that cited source.
 
-`read_index_source` is an optional agent tool for expanding context around an already returned source number. It cannot read arbitrary paths: the agent must pass a registered `source_number`, and `context_lines` defaults to 20 and caps at 100. Broad summary questions auto-enable the tool unless `--no-agent-read-source-tool` is set; `--agent-read-source-tool` enables it explicitly. Expanded ranges broaden the existing source number so final citations keep pointing at `[source N]`. To avoid redundant context, overlapping reads default to `--read-source-overlap-policy skip`; `merge` broadens the first expanded source when a later overlapping read adds useful lines, and `allow` preserves the old always-read behavior. Debug output reports `already covered` or `merged` decisions, for example when `[source 2]` is already covered by expanded `[source 11]`.
+`Source audit` summarizes the evidence set:
+
+```text
+Source audit:
+- available to agent: 20
+- cited in answer: 4
+- uncited: 16
+- search tool calls: 2
+- retrieval calls: 5
+- read source calls: 1
+- read source overlap policy: merge
+- introduced by query:
+  - AlphaFold: 12
+  - protein folding: 8
+```
+
+`available to agent` is the unique source set registered from tool searches. `cited in answer` is the subset referenced in the final text, and `uncited` is the difference. `search tool calls` counts outer `search_index` calls; `retrieval calls` can be higher because broad search may perform internal expansion retrievals. `introduced by query` counts the first query that introduced each source and appears when provenance is available under `--show-agent-tools`.
+
+`read_index_source` is an optional agent tool for expanding context around an already returned source number. It cannot read arbitrary paths: the agent must pass a registered `source_number`, and `context_lines` defaults to 20 and caps at 100. Broad summary questions auto-enable the tool unless `--no-agent-read-source-tool` is set; `--agent-read-source-tool` enables it explicitly. Expanded ranges broaden the existing source number so final citations keep pointing at `[source N]`.
+
+Use `--read-source-overlap-policy skip|merge|allow` to control overlapping reads. Broad agent summaries default to `merge` unless explicitly overridden; other agent questions default to `skip`. `skip` avoids exact or mostly covered duplicate reads, `merge` broadens the first expanded source when a later overlapping read adds useful lines, and `allow` always performs the read and returns separate expanded context. Debug output reports `already covered`, `merged`, or `merge skipped` decisions, for example when `[source 2]` is already covered by expanded `[source 11]`.
+
+```bash
+falkengo ask --agent "summarize anything related to AlphaFold" \
+  --read-source-overlap-policy merge \
+  --show-agent-tools
+```
 
 Agentic ask uses the same embedding environment variables as retrieval and the OpenAI-compatible agent LLM variables:
 

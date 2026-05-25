@@ -216,6 +216,123 @@ func TestReadIndexSourceToolMergesSubstantialOverlapWhenConfigured(t *testing.T)
 	}
 }
 
+func TestReadIndexSourceToolMergeUnderCapSucceeds(t *testing.T) {
+	file := writeReadSourceFile(t, numberedLines(220))
+	registry := NewCitationRegistry()
+	registry.Register(readSourceRetrievedChunk(file, 20, 25))
+	registry.Register(readSourceRetrievedChunk(file, 30, 35))
+	tool := NewReadIndexSourceTool(ReadSourceToolOptions{
+		Registry:                 registry,
+		OverlapPolicy:            ReadSourceOverlapMerge,
+		MaxMergedReadSourceLines: 200,
+	})
+
+	first := executeReadSourceTool(t, tool, `{"source_number":1,"context_lines":60}`)
+	if !first.Success {
+		t.Fatalf("first result = %+v, want success", first)
+	}
+	second := executeReadSourceTool(t, tool, `{"source_number":2,"context_lines":60}`)
+	payload := decodeReadSourcePayload(t, second.Payload)
+	if payload.Status != "merge_existing" || payload.CoveredByEndLine != 95 {
+		t.Fatalf("payload = %+v, want merge under cap to 1-95", payload)
+	}
+}
+
+func TestReadIndexSourceToolMergeOverCapReturnsMergeTooLarge(t *testing.T) {
+	file := writeReadSourceFile(t, numberedLines(420))
+	registry := NewCitationRegistry()
+	registry.Register(readSourceRetrievedChunk(file, 100, 100))
+	registry.Register(readSourceRetrievedChunk(file, 100, 260))
+	tool := NewReadIndexSourceTool(ReadSourceToolOptions{
+		Registry:                 registry,
+		OverlapPolicy:            ReadSourceOverlapMerge,
+		MaxMergedReadSourceLines: 250,
+	})
+
+	first := executeReadSourceTool(t, tool, `{"source_number":1,"context_lines":100}`)
+	if !first.Success {
+		t.Fatalf("first result = %+v, want success", first)
+	}
+	second := executeReadSourceTool(t, tool, `{"source_number":2,"context_lines":100}`)
+	payload := decodeReadSourcePayload(t, second.Payload)
+	if !second.Success || payload.Status != "merge_too_large" {
+		t.Fatalf("second = %+v payload = %+v, want merge_too_large success", second, payload)
+	}
+	if payload.CoveredBySourceNumber != 1 || payload.MaxMergedReadSourceLines != 250 {
+		t.Fatalf("payload = %+v, want covering source 1 and cap 250", payload)
+	}
+	source, ok := registry.SourceByNumber(1)
+	if !ok {
+		t.Fatal("source 1 missing")
+	}
+	if source.StartLine != 1 || source.EndLine != 200 {
+		t.Fatalf("source 1 lines = %d-%d, want unchanged 1-200", source.StartLine, source.EndLine)
+	}
+	if !strings.Contains(second.Content, "merging would exceed the max merged read range of 250 lines") {
+		t.Fatalf("content = %q, want cap guidance", second.Content)
+	}
+}
+
+func TestReadIndexSourceToolAlreadyCoveredIgnoresMergeCap(t *testing.T) {
+	file := writeReadSourceFile(t, numberedLines(500))
+	registry := NewCitationRegistry()
+	registry.Register(readSourceRetrievedChunk(file, 150, 300))
+	registry.Register(readSourceRetrievedChunk(file, 155, 155))
+	tool := NewReadIndexSourceTool(ReadSourceToolOptions{
+		Registry:                 registry,
+		OverlapPolicy:            ReadSourceOverlapMerge,
+		MaxMergedReadSourceLines: 250,
+	})
+
+	first := executeReadSourceTool(t, tool, `{"source_number":1,"context_lines":100}`)
+	if !first.Success {
+		t.Fatalf("first result = %+v, want success", first)
+	}
+	second := executeReadSourceTool(t, tool, `{"source_number":2,"context_lines":0}`)
+	payload := decodeReadSourcePayload(t, second.Payload)
+	if !second.Success || payload.Status != "already_covered" {
+		t.Fatalf("second = %+v payload = %+v, want already_covered despite large existing range", second, payload)
+	}
+}
+
+func TestReadIndexSourceToolAlphaFoldOverlapRegression(t *testing.T) {
+	file := writeReadSourceFileNamed(t, "sdb - May 18 2026.md", numberedLines(150))
+	registry := NewCitationRegistry()
+	registry.Register(readSourceRetrievedChunk(file, 1, 1))
+	registry.Register(readSourceRetrievedChunk(file, 63, 64))
+	for i := 3; i <= 10; i++ {
+		registry.Register(readSourceRetrievedChunk(file, 100+i, 100+i))
+	}
+	registry.Register(readSourceRetrievedChunk(file, 21, 26))
+	tool := NewReadIndexSourceTool(ReadSourceToolOptions{
+		Registry:      registry,
+		OverlapPolicy: ReadSourceOverlapMerge,
+	})
+
+	first := executeReadSourceTool(t, tool, `{"source_number":11,"context_lines":60}`)
+	if !first.Success {
+		t.Fatalf("first result = %+v, want success", first)
+	}
+	second := executeReadSourceTool(t, tool, `{"source_number":2,"context_lines":60}`)
+	payload := decodeReadSourcePayload(t, second.Payload)
+	if payload.Status != "merge_existing" {
+		t.Fatalf("payload = %+v, want merge_existing for AlphaFold overlap", payload)
+	}
+	if payload.CoveredBySourceNumber != 11 || payload.CoveredByStartLine != 1 || payload.CoveredByEndLine != 124 {
+		t.Fatalf("payload = %+v, want source 2 merged into source 11 lines 1-124", payload)
+	}
+	source, ok := registry.SourceByNumber(11)
+	if !ok {
+		t.Fatal("source 11 missing")
+	}
+	if source.StartLine != 1 || source.EndLine != 124 {
+		t.Fatalf("source 11 lines = %d-%d, want 1-124", source.StartLine, source.EndLine)
+	}
+	if !strings.Contains(second.Content, "requested [source 2] overlaps [source 11]") {
+		t.Fatalf("content = %q, want overlap explanation", second.Content)
+	}
+}
+
 func TestReadIndexSourceToolAllowPolicyPreservesOverlappingRead(t *testing.T) {
 	file := writeReadSourceFile(t, numberedLines(150))
 	registry := NewCitationRegistry()

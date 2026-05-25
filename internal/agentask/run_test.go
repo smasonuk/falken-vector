@@ -849,12 +849,75 @@ func TestPopulateResultToolMetricsCountsSearchAndRetrievalCalls(t *testing.T) {
 				{Name: SearchIndexToolName, Payload: json.RawMessage(`{"retrieval_calls":3}`)},
 				{Name: ReadIndexSourceToolName, Payload: json.RawMessage(`{"status":"ok"}`)},
 				{Name: SearchIndexToolName, Payload: json.RawMessage(`{"retrieval_calls":2}`)},
+				{Name: ReadIndexSourceToolName, Payload: json.RawMessage(`{"status":"already_covered"}`)},
+				{Name: ReadIndexSourceToolName, Payload: json.RawMessage(`{"status":"merge_existing"}`)},
+				{Name: ReadIndexSourceToolName, Payload: json.RawMessage(`{"status":"merge_too_large"}`)},
 			},
 		},
 	}
 	populateResultToolMetrics(&result)
 	if result.SearchToolCalls != 2 || result.RetrievalCalls != 5 {
 		t.Fatalf("metrics = search %d retrieval %d, want 2 and 5", result.SearchToolCalls, result.RetrievalCalls)
+	}
+	if result.ReadSourceCalls != 1 || result.ReadSourceAlreadyCovered != 1 || result.ReadSourceMerges != 1 || result.ReadSourceMergeTooLarge != 1 {
+		t.Fatalf("read-source metrics = calls %d covered %d merges %d too-large %d, want 1/1/1/1",
+			result.ReadSourceCalls,
+			result.ReadSourceAlreadyCovered,
+			result.ReadSourceMerges,
+			result.ReadSourceMergeTooLarge,
+		)
+	}
+}
+
+func TestRunPopulatesSourceAuditMetricsFromToolTrace(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search-1",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold","strategy":"broad"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search-2",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"protein folding","strategy":"broad"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold evidence was found [source 1].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize information on alphafold or anything related to folding"
+	opts.CoverageNudge = boolPtr(false)
+	opts.ThinSourceNudge = boolPtr(false)
+	opts.MaxBroadExpansionQueries = 2
+	opts.RetrieveWithPlan = func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+		text := "Outputs include A3M, PDB, error JSON, NCBI, UniProt metadata, monomer, dimer, and ligand workflow notes."
+		if strings.Contains(strings.ToLower(opts.Question), "protein folding") {
+			text = "PDB and error JSON are available for protein folding."
+		}
+		chunkID := "chunk-" + strings.NewReplacer(" ", "-", "/", "-", "\"", "").Replace(opts.Question)
+		return rag.RetrieveResult{
+			Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+			Chunks: []rag.RetrievedChunk{
+				testRetrievedChunk(chunkID, "alphafold/meetings/sdb.md", text, "Document: hidden"),
+			},
+		}, nil
+	}
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.SearchToolCalls != 2 {
+		t.Fatalf("SearchToolCalls = %d, want 2", result.SearchToolCalls)
+	}
+	if result.RetrievalCalls != 5 {
+		t.Fatalf("RetrievalCalls = %d, want 5", result.RetrievalCalls)
 	}
 }
 

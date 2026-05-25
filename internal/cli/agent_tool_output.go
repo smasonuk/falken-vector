@@ -232,6 +232,7 @@ func formatAgentReadSourceToolResult(result falken.ToolResult) ([]string, bool) 
 		CoveredByPath         string   `json:"covered_by_path"`
 		CoveredByStartLine    int      `json:"covered_by_start_line"`
 		CoveredByEndLine      int      `json:"covered_by_end_line"`
+		MaxMergedLines        int      `json:"max_merged_read_source_lines"`
 		Warnings              []string `json:"warnings"`
 		Error                 string   `json:"error"`
 	}
@@ -266,6 +267,14 @@ func formatAgentReadSourceToolResult(result falken.ToolResult) ([]string, bool) 
 			EndLine:      payload.CoveredByEndLine,
 		}
 		summary = fmt.Sprintf("agent tool result: %s ok, merged [source %d] into expanded %s", result.Name, payload.SourceNumber, SourceReference(covered))
+	}
+	if status == "merge_too_large" && payload.CoveredBySourceNumber > 0 {
+		summary = fmt.Sprintf("agent tool result: %s ok, merge skipped for [source %d]; merging into [source %d] would exceed max merged read range %d lines",
+			result.Name,
+			payload.SourceNumber,
+			payload.CoveredBySourceNumber,
+			payload.MaxMergedLines,
+		)
 	}
 	out := []string{summary}
 	for _, warning := range payload.Warnings {

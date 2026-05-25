@@ -142,6 +142,7 @@ const (
 // like ReadSourcePolicyOn unless ReadSourcePolicyOff is set.
 // ReadSourceOverlapPolicy controls whether overlapping read_index_source calls
 // are skipped, merged into an existing expanded source, or always allowed.
+// The default uses merge for broad agent questions and skip otherwise.
 type AskRequest struct {
 	Question string
 
@@ -180,15 +181,20 @@ type Answer struct {
 	// AvailableSources mirrors Sources for callers that want explicit naming.
 	AvailableSources []Source
 
-	CitationWarnings   []string
-	CitationValid      bool
-	CoverageWarnings   []string
-	CoverageNudged     bool
-	ThinSourceWarnings []string
-	ThinSourceNudged   bool
-	Retried            bool
-	SearchToolCalls    int
-	RetrievalCalls     int
+	CitationWarnings         []string
+	CitationValid            bool
+	CoverageWarnings         []string
+	CoverageNudged           bool
+	ThinSourceWarnings       []string
+	ThinSourceNudged         bool
+	Retried                  bool
+	SearchToolCalls          int
+	RetrievalCalls           int
+	ReadSourceCalls          int
+	ReadSourceOverlapPolicy  string
+	ReadSourceAlreadyCovered int
+	ReadSourceMerges         int
+	ReadSourceMergeTooLarge  int
 
 	ToolCalls []ToolCallSummary
 }

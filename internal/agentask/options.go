@@ -66,25 +66,33 @@ type Options struct {
 	// ReadSourceOverlapPolicy controls redundant read_index_source expansions.
 	// Empty defaults to skip.
 	ReadSourceOverlapPolicy ReadSourceOverlapPolicy
+	// MaxMergedReadSourceLines caps merged read_index_source ranges.
+	// Values <= 0 use the default.
+	MaxMergedReadSourceLines int
 
 	Events falken.EventSink
 }
 
 type Result struct {
-	Answer             string
-	Sources            []rag.SourceChunk
-	CitationNotes      []string
-	CitationWarnings   []string
-	CitationValid      bool
-	CoverageWarnings   []string
-	CoverageNudged     bool
-	ThinSourceWarnings []string
-	ThinSourceNudged   bool
-	Retried            bool
-	ToolCalls          []string
-	Trace              AgentTrace
-	SearchToolCalls    int
-	RetrievalCalls     int
+	Answer                   string
+	Sources                  []rag.SourceChunk
+	CitationNotes            []string
+	CitationWarnings         []string
+	CitationValid            bool
+	CoverageWarnings         []string
+	CoverageNudged           bool
+	ThinSourceWarnings       []string
+	ThinSourceNudged         bool
+	Retried                  bool
+	ToolCalls                []string
+	Trace                    AgentTrace
+	SearchToolCalls          int
+	RetrievalCalls           int
+	ReadSourceCalls          int
+	ReadSourceAlreadyCovered int
+	ReadSourceMerges         int
+	ReadSourceMergeTooLarge  int
+	ReadSourceOverlapPolicy  string
 }
 
 // AgentTrace records structured tool activity for an agent ask run.

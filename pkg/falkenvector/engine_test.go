@@ -142,12 +142,14 @@ func TestReadSourceToolOption(t *testing.T) {
 
 func TestReadSourceOverlapPolicyOption(t *testing.T) {
 	tests := []struct {
-		name    string
-		policy  ReadSourceOverlapPolicy
-		want    agentask.ReadSourceOverlapPolicy
-		wantErr bool
+		name     string
+		policy   ReadSourceOverlapPolicy
+		question string
+		want     agentask.ReadSourceOverlapPolicy
+		wantErr  bool
 	}{
-		{name: "default skip", want: agentask.ReadSourceOverlapSkip},
+		{name: "default narrow skip", question: "Where is citation validation implemented?", want: agentask.ReadSourceOverlapSkip},
+		{name: "default broad merge", question: "summarize anything related to AlphaFold", want: agentask.ReadSourceOverlapMerge},
 		{name: "skip", policy: ReadSourceOverlapSkip, want: agentask.ReadSourceOverlapSkip},
 		{name: "merge", policy: ReadSourceOverlapMerge, want: agentask.ReadSourceOverlapMerge},
 		{name: "allow", policy: ReadSourceOverlapAllow, want: agentask.ReadSourceOverlapAllow},
@@ -155,7 +157,7 @@ func TestReadSourceOverlapPolicyOption(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := readSourceOverlapPolicyOption(tt.policy)
+			got, err := readSourceOverlapPolicyOption(tt.policy, tt.question)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("readSourceOverlapPolicyOption succeeded, want error")

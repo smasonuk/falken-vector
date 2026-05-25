@@ -47,6 +47,9 @@ func TestReadSourcePromptIncludesBroadSummaryThinSpanGuidance(t *testing.T) {
 		"several relevant sources come from the same document",
 		"read one representative source",
 		"expanded line ranges would largely overlap",
+		"already covered by another source",
+		"merged into another expanded source",
+		"cite the covering source number",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want substring %q", prompt, want)

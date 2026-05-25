@@ -14,6 +14,8 @@ import (
 
 func newIngestCommand(opts *options) *cobra.Command {
 	var extensions string
+	var excludeExtensions string
+	var excludeDirs string
 	var chunkSize int
 	var chunkOverlap int
 	var chunker string
@@ -75,23 +77,27 @@ func newIngestCommand(opts *options) *cobra.Command {
 				return err
 			}
 			summary, err := ingest.Run(ctx, store, ingest.Options{
-				Root:         args[0],
-				Paths:        paths,
-				Extensions:   ingest.ParseExtensions(extensions),
-				ChunkSize:    chunkSize,
-				ChunkOverlap: chunkOverlap,
-				ChunkerMode:  chunkerMode,
-				DryRun:       dryRun,
-				SyncSource:   syncSource,
-				Verbose:      opts.verbose,
-				Out:          cmd.OutOrStdout(),
-				Embedder:     embedder,
+				Root:              args[0],
+				Paths:             paths,
+				Extensions:        ingest.ParseExtensions(extensions),
+				ExcludeExtensions: ingest.ParseExtensions(excludeExtensions),
+				ExcludeDirs:       ingest.ParseCSVList(excludeDirs),
+				ChunkSize:         chunkSize,
+				ChunkOverlap:      chunkOverlap,
+				ChunkerMode:       chunkerMode,
+				DryRun:            dryRun,
+				SyncSource:        syncSource,
+				Verbose:           opts.verbose,
+				Out:               cmd.OutOrStdout(),
+				Embedder:          embedder,
 			})
 			ingest.PrintSummary(cmd.OutOrStdout(), summary)
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&extensions, "extensions", "", "restrict indexing to comma-separated file extensions")
+	cmd.Flags().StringVar(&excludeExtensions, "exclude-extensions", "", "exclude comma-separated file extensions from indexing")
+	cmd.Flags().StringVar(&excludeDirs, "exclude-dirs", "", "exclude comma-separated directory names from indexing")
 	cmd.Flags().StringVar(&chunker, "chunker", "auto", "chunking strategy: auto, fixed, markdown, text, or code")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1200, "target maximum chunk size in characters")
 	cmd.Flags().IntVar(&chunkOverlap, "chunk-overlap", 200, "overlap in characters for fixed chunking and large-section fallback")

@@ -28,13 +28,15 @@ func TestErrNoIndexMatchesInternalNoIndex(t *testing.T) {
 
 func TestPublicIngestTypesConstruct(t *testing.T) {
 	request := IngestRequest{
-		Root:         ".",
-		Extensions:   []string{"go", "md"},
-		ChunkSize:    1200,
-		ChunkOverlap: 200,
-		ChunkerMode:  ChunkerAuto,
-		DryRun:       true,
-		SyncSource:   true,
+		Root:              ".",
+		Extensions:        []string{"go", "md"},
+		ExcludeExtensions: []string{"tmp"},
+		ExcludeDirs:       []string{"fixtures"},
+		ChunkSize:         1200,
+		ChunkOverlap:      200,
+		ChunkerMode:       ChunkerAuto,
+		DryRun:            true,
+		SyncSource:        true,
 	}
 	result := IngestResult{
 		Directory:      "/repo",
@@ -43,7 +45,7 @@ func TestPublicIngestTypesConstruct(t *testing.T) {
 		ChunksEmbedded: 0,
 		Warnings:       []string{"note"},
 	}
-	if request.ChunkerMode != ChunkerAuto || result.Directory == "" || len(result.Warnings) != 1 {
+	if request.ChunkerMode != ChunkerAuto || len(request.ExcludeExtensions) != 1 || len(request.ExcludeDirs) != 1 || result.Directory == "" || len(result.Warnings) != 1 {
 		t.Fatalf("request=%+v result=%+v", request, result)
 	}
 }
@@ -64,6 +66,12 @@ func TestIngestRequestDefaultsMatchCLIIngestDefaults(t *testing.T) {
 	}
 	if request.Extensions != nil {
 		t.Fatalf("Extensions default = %+v, want nil", request.Extensions)
+	}
+	if request.ExcludeExtensions != nil {
+		t.Fatalf("ExcludeExtensions default = %+v, want nil", request.ExcludeExtensions)
+	}
+	if request.ExcludeDirs != nil {
+		t.Fatalf("ExcludeDirs default = %+v, want nil", request.ExcludeDirs)
 	}
 }
 
@@ -91,6 +99,44 @@ func TestEngineIngestDryRunNoManifestDoesNotWriteState(t *testing.T) {
 	}
 	if result.Directory != root || result.Scanned != 1 || result.NewFiles != 1 || result.ChunksEmbedded != 0 {
 		t.Fatalf("result = %+v, want dry-run scan of one new file", result)
+	}
+	if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state dir stat error = %v, want not exist", err)
+	}
+}
+
+func TestEngineIngestDryRunRespectsExcludes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "keep.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write keep: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "skip.md"), []byte("# Skip\n"), 0o644); err != nil {
+		t.Fatalf("write skip: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "fixtures"), 0o755); err != nil {
+		t.Fatalf("mkdir fixtures: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "fixtures", "fixture.go"), []byte("package fixture\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	stateDir := filepath.Join(t.TempDir(), "state")
+	engine, err := NewEngine(EngineConfig{StateDir: stateDir})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	result, err := engine.Ingest(context.Background(), IngestRequest{
+		Root:              root,
+		DryRun:            true,
+		Extensions:        []string{"go", "md"},
+		ExcludeExtensions: []string{"md"},
+		ExcludeDirs:       []string{"fixtures"},
+	})
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if result.Scanned != 1 || result.NewFiles != 1 {
+		t.Fatalf("result = %+v, want only keep.go", result)
 	}
 	if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("state dir stat error = %v, want not exist", err)

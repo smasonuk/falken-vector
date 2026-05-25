@@ -53,6 +53,12 @@ func TestIngestHelpDescribesExtensionsAsRestriction(t *testing.T) {
 	if !strings.Contains(out.String(), "restrict indexing to comma-separated file extensions") {
 		t.Fatalf("ingest help output = %q, want --extensions restriction help", out.String())
 	}
+	if !strings.Contains(out.String(), "exclude comma-separated file extensions") {
+		t.Fatalf("ingest help output = %q, want --exclude-extensions help", out.String())
+	}
+	if !strings.Contains(out.String(), "exclude comma-separated directory names") {
+		t.Fatalf("ingest help output = %q, want --exclude-dirs help", out.String())
+	}
 }
 
 func TestCommandContextUsesDefaultTimeout(t *testing.T) {
@@ -185,6 +191,44 @@ func TestIngestDryRunDoesNotCreateStateDirOrNeedAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "new files: 1") {
 		t.Fatalf("dry-run output = %q", out.String())
+	}
+}
+
+func TestIngestDryRunRespectsExcludes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "keep.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "skip.md"), []byte("# Skip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "fixtures"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "fixtures", "fixture.go"), []byte("package fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(root, ".falkengo")
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{
+		"--state-dir", state,
+		"ingest", root,
+		"--dry-run",
+		"--extensions", "go,md",
+		"--exclude-extensions", "md",
+		"--exclude-dirs", "fixtures",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, "scanned: 1") || !strings.Contains(output, "new files: 1") {
+		t.Fatalf("dry-run output = %q, want only non-excluded file", output)
+	}
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Fatalf("state dir stat = %v, want not created", err)
 	}
 }
 

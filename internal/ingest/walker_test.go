@@ -73,6 +73,80 @@ func TestFindCandidateFilesFiltersExtensions(t *testing.T) {
 	}
 }
 
+func TestFindCandidateFilesExcludesExtensions(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.md"), "a")
+	writeFile(t, filepath.Join(root, "b.go"), "b")
+	writeFile(t, filepath.Join(root, "README"), "readme")
+	files, err := FindCandidateFiles(context.Background(), WalkOptions{
+		Root:              root,
+		StateDir:          filepath.Join(root, ".falkengo"),
+		ExcludeExtensions: []string{"md"},
+	})
+	if err != nil {
+		t.Fatalf("FindCandidateFiles: %v", err)
+	}
+	got := fileNames(root, files)
+	if !reflect.DeepEqual(got, []string{"README", "b.go"}) {
+		t.Fatalf("files = %v, want non-md files", got)
+	}
+}
+
+func TestFindCandidateFilesExcludeExtensionWinsOverInclude(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.md"), "a")
+	writeFile(t, filepath.Join(root, "b.go"), "b")
+	files, err := FindCandidateFiles(context.Background(), WalkOptions{
+		Root:              root,
+		StateDir:          filepath.Join(root, ".falkengo"),
+		Extensions:        []string{"md", "go"},
+		ExcludeExtensions: []string{".md"},
+	})
+	if err != nil {
+		t.Fatalf("FindCandidateFiles: %v", err)
+	}
+	got := fileNames(root, files)
+	if !reflect.DeepEqual(got, []string{"b.go"}) {
+		t.Fatalf("files = %v, want only go", got)
+	}
+}
+
+func TestFindCandidateFilesExcludesDirectoryBasenames(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "keep", "a.md"), "a")
+	writeFile(t, filepath.Join(root, "docs", "fixtures", "b.md"), "b")
+	writeFile(t, filepath.Join(root, "fixtures", "c.md"), "c")
+	files, err := FindCandidateFiles(context.Background(), WalkOptions{
+		Root:        root,
+		StateDir:    filepath.Join(root, ".falkengo"),
+		ExcludeDirs: []string{"fixtures"},
+	})
+	if err != nil {
+		t.Fatalf("FindCandidateFiles: %v", err)
+	}
+	got := fileNames(root, files)
+	if !reflect.DeepEqual(got, []string{filepath.Join("keep", "a.md")}) {
+		t.Fatalf("files = %v, want fixtures skipped at any depth", got)
+	}
+}
+
+func TestFindCandidateFilesSkipsFalkengoWithoutConfiguredStateDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "keep.md"), "keep")
+	writeFile(t, filepath.Join(root, ".falkengo", "hidden.md"), "state")
+	files, err := FindCandidateFiles(context.Background(), WalkOptions{
+		Root:     root,
+		StateDir: filepath.Join(root, "other-state"),
+	})
+	if err != nil {
+		t.Fatalf("FindCandidateFiles: %v", err)
+	}
+	got := fileNames(root, files)
+	if !reflect.DeepEqual(got, []string{"keep.md"}) {
+		t.Fatalf("files = %v, want .falkengo skipped", got)
+	}
+}
+
 func TestFindCandidateFilesIncludesEnvExample(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, ".env.example"), "FALKENGO_EMBEDDING_MODEL_API_KEY=example")

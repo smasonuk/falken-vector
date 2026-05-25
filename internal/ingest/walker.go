@@ -20,9 +20,11 @@ var DefaultExtensions = []string{".txt", ".md", ".go", ".py", ".js", ".ts", ".ts
 const textSniffBytes = 8192
 
 type WalkOptions struct {
-	Root       string
-	StateDir   string
-	Extensions []string
+	Root              string
+	StateDir          string
+	Extensions        []string
+	ExcludeExtensions []string
+	ExcludeDirs       []string
 }
 
 type CandidateFile struct {
@@ -50,6 +52,8 @@ func FindCandidateFiles(ctx context.Context, opts WalkOptions) ([]CandidateFile,
 		return nil, err
 	}
 	extensions := extensionSet(opts.Extensions)
+	excludeExtensions := extensionSet(opts.ExcludeExtensions)
+	excludeDirs := dirNameSet(opts.ExcludeDirs)
 	restrictExtensions := len(extensions) != 0
 	files := make([]CandidateFile, 0)
 
@@ -75,7 +79,7 @@ func FindCandidateFiles(ctx context.Context, opts WalkOptions) ([]CandidateFile,
 		}
 		name := entry.Name()
 		if entry.IsDir() {
-			if shouldSkipDir(name) || isHidden(name) {
+			if shouldSkipDir(name) || excludeDirs[name] || isHidden(name) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -85,6 +89,9 @@ func FindCandidateFiles(ctx context.Context, opts WalkOptions) ([]CandidateFile,
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(name))
+		if excludeExtensions[ext] {
+			return nil
+		}
 		if !hiddenAllowed && restrictExtensions && !extensions[ext] {
 			return nil
 		}
@@ -127,6 +134,18 @@ func extensionSet(values []string) map[string]bool {
 			ext = "." + ext
 		}
 		set[ext] = true
+	}
+	return set
+}
+
+func dirNameSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			continue
+		}
+		set[filepath.Base(filepath.Clean(name))] = true
 	}
 	return set
 }

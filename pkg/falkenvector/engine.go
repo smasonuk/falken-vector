@@ -252,17 +252,19 @@ func (e *Engine) Ingest(ctx context.Context, request IngestRequest) (IngestResul
 		Ingest: &IngestEvent{Directory: directory},
 	})
 	summary, err := ingest.Run(ctx, store, ingest.Options{
-		Root:         normalized.Root,
-		Paths:        e.paths,
-		Extensions:   append([]string(nil), normalized.Extensions...),
-		ChunkSize:    normalized.ChunkSize,
-		ChunkOverlap: normalized.ChunkOverlap,
-		ChunkerMode:  chunkerMode,
-		DryRun:       normalized.DryRun,
-		SyncSource:   normalized.SyncSource,
-		Verbose:      false,
-		Out:          io.Discard,
-		Embedder:     embedder,
+		Root:              normalized.Root,
+		Paths:             e.paths,
+		Extensions:        append([]string(nil), normalized.Extensions...),
+		ExcludeExtensions: append([]string(nil), normalized.ExcludeExtensions...),
+		ExcludeDirs:       append([]string(nil), normalized.ExcludeDirs...),
+		ChunkSize:         normalized.ChunkSize,
+		ChunkOverlap:      normalized.ChunkOverlap,
+		ChunkerMode:       chunkerMode,
+		DryRun:            normalized.DryRun,
+		SyncSource:        normalized.SyncSource,
+		Verbose:           false,
+		Out:               io.Discard,
+		Embedder:          embedder,
 		Progress: func(event ingest.ProgressEvent) {
 			ingestEvent := publicIngestProgressEvent(event)
 			if ingestEvent.Directory == "" {

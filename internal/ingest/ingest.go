@@ -21,20 +21,22 @@ import (
 var ErrPendingRunDetected = errors.New("Pending ingest run detected. Run `falkengo repair`.")
 
 type Options struct {
-	Root         string
-	Paths        config.Paths
-	Extensions   []string
-	ChunkSize    int
-	ChunkOverlap int
-	ChunkerMode  ChunkerMode
-	DryRun       bool
-	SyncSource   bool
-	Verbose      bool
-	Out          io.Writer
-	Embedder     llm.Embedder
-	OpenVector   func(context.Context, string, int) (vectorstore.Store, error)
-	Now          func() time.Time
-	Progress     func(ProgressEvent)
+	Root              string
+	Paths             config.Paths
+	Extensions        []string
+	ExcludeExtensions []string
+	ExcludeDirs       []string
+	ChunkSize         int
+	ChunkOverlap      int
+	ChunkerMode       ChunkerMode
+	DryRun            bool
+	SyncSource        bool
+	Verbose           bool
+	Out               io.Writer
+	Embedder          llm.Embedder
+	OpenVector        func(context.Context, string, int) (vectorstore.Store, error)
+	Now               func() time.Time
+	Progress          func(ProgressEvent)
 }
 
 type Summary struct {
@@ -113,9 +115,11 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 
 	progressf(opts, "scanning %s\n", sourceRoot)
 	files, err := FindCandidateFiles(ctx, WalkOptions{
-		Root:       sourceRoot,
-		StateDir:   opts.Paths.StateDir,
-		Extensions: opts.Extensions,
+		Root:              sourceRoot,
+		StateDir:          opts.Paths.StateDir,
+		Extensions:        opts.Extensions,
+		ExcludeExtensions: opts.ExcludeExtensions,
+		ExcludeDirs:       opts.ExcludeDirs,
 	})
 	if err != nil {
 		if isContextStop(ctx, err) {
@@ -440,6 +444,10 @@ func PrintSummary(w io.Writer, summary Summary) {
 }
 
 func ParseExtensions(value string) []string {
+	return ParseCSVList(value)
+}
+
+func ParseCSVList(value string) []string {
 	parts := strings.Split(value, ",")
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {

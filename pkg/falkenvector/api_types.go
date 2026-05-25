@@ -293,13 +293,15 @@ const (
 // Root defaults to ".". ChunkSize defaults to the CLI/internal ingest default.
 // ChunkOverlap defaults to the CLI default. ChunkerMode defaults to ChunkerAuto.
 type IngestRequest struct {
-	Root         string
-	Extensions   []string
-	ChunkSize    int
-	ChunkOverlap int
-	ChunkerMode  ChunkerMode
-	DryRun       bool
-	SyncSource   bool
+	Root              string
+	Extensions        []string
+	ExcludeExtensions []string
+	ExcludeDirs       []string
+	ChunkSize         int
+	ChunkOverlap      int
+	ChunkerMode       ChunkerMode
+	DryRun            bool
+	SyncSource        bool
 }
 
 // IngestResult summarizes an ingest run.

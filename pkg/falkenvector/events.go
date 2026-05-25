@@ -20,6 +20,10 @@ const (
 	EventRetrievalCompleted EventType = "retrieval.completed"
 	EventRetrievalFailed    EventType = "retrieval.failed"
 
+	EventIngestStarted   EventType = "ingest.started"
+	EventIngestProgress  EventType = "ingest.progress"
+	EventIngestCompleted EventType = "ingest.completed"
+
 	EventEmbeddingRequest  EventType = "embedding.request"
 	EventEmbeddingResponse EventType = "embedding.response"
 	EventEmbeddingFailed   EventType = "embedding.failed"
@@ -47,6 +51,7 @@ type Event struct {
 	Error   string `json:"error,omitempty"`
 
 	Retrieval  *RetrievalEvent  `json:"retrieval,omitempty"`
+	Ingest     *IngestEvent     `json:"ingest,omitempty"`
 	Embedding  *EmbeddingEvent  `json:"embedding,omitempty"`
 	LLM        *LLMEvent        `json:"llm,omitempty"`
 	ToolCall   *ToolCallEvent   `json:"tool_call,omitempty"`
@@ -88,6 +93,23 @@ type RetrievalEvent struct {
 	Sources     []RetrievedChunk `json:"sources,omitempty"`
 
 	Warning string `json:"warning,omitempty"`
+}
+
+// IngestEvent describes ingest progress and summary metadata.
+type IngestEvent struct {
+	Directory   string `json:"directory,omitempty"`
+	CurrentPath string `json:"current_path,omitempty"`
+	CurrentFile int    `json:"current_file,omitempty"`
+	TotalFiles  int    `json:"total_files,omitempty"`
+	Action      string `json:"action,omitempty"`
+
+	Scanned        int `json:"scanned,omitempty"`
+	NewFiles       int `json:"new_files,omitempty"`
+	ChangedFiles   int `json:"changed_files,omitempty"`
+	UnchangedFiles int `json:"unchanged_files,omitempty"`
+	DeletedFiles   int `json:"deleted_files,omitempty"`
+	FailedFiles    int `json:"failed_files,omitempty"`
+	ChunksEmbedded int `json:"chunks_embedded,omitempty"`
 }
 
 // EmbeddingEvent describes an embedding request or response without exposing

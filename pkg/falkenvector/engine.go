@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/smasonuk/falken-vector/internal/agentask"
 	"github.com/smasonuk/falken-vector/internal/compact"
 	internalconfig "github.com/smasonuk/falken-vector/internal/config"
+	"github.com/smasonuk/falken-vector/internal/ingest"
 	"github.com/smasonuk/falken-vector/internal/llm"
 	"github.com/smasonuk/falken-vector/internal/manifest"
 	"github.com/smasonuk/falken-vector/internal/openaihttp"
@@ -163,6 +165,126 @@ func (e *Engine) Status(ctx context.Context) (Status, error) {
 		},
 		LastIndexedAt: stats.LastIndexedAt,
 	}, nil
+}
+
+// Ingest indexes text files from a source directory without printing.
+func (e *Engine) Ingest(ctx context.Context, request IngestRequest) (IngestResult, error) {
+	if err := e.checkReady(); err != nil {
+		return IngestResult{}, err
+	}
+	emitter := newEventEmitter(e.eventSink())
+	emitter.emit(Event{Type: EventRunStarted, Message: "ingest"})
+
+	normalized := normalizeIngestRequest(request)
+	directory, err := ingestDirectory(normalized.Root)
+	result := IngestResult{Directory: directory}
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return result, err
+	}
+
+	chunkerMode, err := ingest.ParseChunkerMode(string(normalized.ChunkerMode))
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return result, err
+	}
+
+	var store manifest.Store
+	if normalized.DryRun {
+		if _, err := os.Stat(e.paths.ManifestPath); err == nil {
+			sqliteStore, err := manifest.Open(e.paths.ManifestPath)
+			if err != nil {
+				err = fmt.Errorf("open manifest database: %w", err)
+				emitter.emitError(EventRunFailed, err)
+				return result, err
+			}
+			store = sqliteStore
+		} else if errors.Is(err, os.ErrNotExist) {
+			store = manifest.EmptyStore{}
+		} else {
+			err = fmt.Errorf("inspect manifest database: %w", err)
+			emitter.emitError(EventRunFailed, err)
+			return result, err
+		}
+	} else {
+		lock, err := internalconfig.AcquireWriteLock(e.paths)
+		if err != nil {
+			err = fmt.Errorf("acquire write lock: %w", err)
+			emitter.emitError(EventRunFailed, err)
+			return result, err
+		}
+		defer lock.Release()
+
+		if err := internalconfig.EnsureStateDirs(e.paths); err != nil {
+			err = fmt.Errorf("create state directories: %w", err)
+			emitter.emitError(EventRunFailed, err)
+			return result, err
+		}
+		sqliteStore, err := manifest.Open(e.paths.ManifestPath)
+		if err != nil {
+			err = fmt.Errorf("open manifest database: %w", err)
+			emitter.emitError(EventRunFailed, err)
+			return result, err
+		}
+		store = sqliteStore
+		if err := sqliteStore.Init(ctx); err != nil {
+			err = fmt.Errorf("initialize manifest database: %w", err)
+			emitter.emitError(EventRunFailed, err)
+			_ = store.Close()
+			return result, err
+		}
+	}
+	defer store.Close()
+
+	var embedder llm.Embedder
+	if !normalized.DryRun {
+		embedder, err = e.newEmbedder()
+		if err != nil {
+			err = fmt.Errorf("configure embedder: %w", err)
+			emitter.emitError(EventRunFailed, err)
+			return result, err
+		}
+		embedder = observableEmbedder{next: embedder, emit: emitter, config: e.config.Observability}
+	}
+
+	emitter.emit(Event{
+		Type:   EventIngestStarted,
+		Ingest: &IngestEvent{Directory: directory},
+	})
+	summary, err := ingest.Run(ctx, store, ingest.Options{
+		Root:         normalized.Root,
+		Paths:        e.paths,
+		Extensions:   append([]string(nil), normalized.Extensions...),
+		ChunkSize:    normalized.ChunkSize,
+		ChunkOverlap: normalized.ChunkOverlap,
+		ChunkerMode:  chunkerMode,
+		DryRun:       normalized.DryRun,
+		SyncSource:   normalized.SyncSource,
+		Verbose:      false,
+		Out:          io.Discard,
+		Embedder:     embedder,
+		Progress: func(event ingest.ProgressEvent) {
+			ingestEvent := publicIngestProgressEvent(event)
+			if ingestEvent.Directory == "" {
+				ingestEvent.Directory = directory
+			}
+			emitter.emit(Event{Type: EventIngestProgress, Ingest: &ingestEvent})
+		},
+	})
+	result = ingestResult(summary, directory)
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return result, err
+	}
+	emitter.emit(Event{
+		Type:   EventIngestCompleted,
+		Ingest: ingestSummaryEvent(result),
+	})
+	emitter.emit(Event{
+		Type:    EventRunCompleted,
+		Message: fmt.Sprintf("indexed %d changed/new files", result.NewFiles+result.ChangedFiles),
+	})
+	return result, nil
 }
 
 // Compact rebuilds the vector database from active manifest chunks without
@@ -707,6 +829,85 @@ func (e *Engine) chatConfig() ModelConfig {
 	config.Model = strings.TrimSpace(config.Model)
 	config.Headers = copyHeaders(config.Headers)
 	return config
+}
+
+func normalizeIngestRequest(request IngestRequest) IngestRequest {
+	out := request
+	if strings.TrimSpace(out.Root) == "" {
+		out.Root = "."
+	}
+	if out.ChunkOverlap == 0 {
+		out.ChunkOverlap = 200
+	}
+	if out.ChunkerMode == "" {
+		out.ChunkerMode = ChunkerAuto
+	}
+	return out
+}
+
+func ingestDirectory(root string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = "."
+	}
+	if root == "." {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("get current directory: %w", err)
+		}
+		return filepath.Clean(wd), nil
+	}
+	if !filepath.IsAbs(root) {
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return "", fmt.Errorf("resolve ingest display directory: %w", err)
+		}
+		root = abs
+	}
+	return filepath.Clean(root), nil
+}
+
+func ingestResult(summary ingest.Summary, directory string) IngestResult {
+	return IngestResult{
+		Directory:      directory,
+		Scanned:        summary.Scanned,
+		NewFiles:       summary.NewFiles,
+		ChangedFiles:   summary.ChangedFiles,
+		UnchangedFiles: summary.UnchangedFiles,
+		DeletedFiles:   summary.DeletedFiles,
+		FailedFiles:    summary.FailedFiles,
+		ChunksEmbedded: summary.ChunksEmbedded,
+	}
+}
+
+func publicIngestProgressEvent(event ingest.ProgressEvent) IngestEvent {
+	return IngestEvent{
+		Directory:      event.Directory,
+		CurrentPath:    event.CurrentPath,
+		CurrentFile:    event.CurrentFile,
+		TotalFiles:     event.TotalFiles,
+		Action:         event.Action,
+		Scanned:        event.Scanned,
+		NewFiles:       event.NewFiles,
+		ChangedFiles:   event.ChangedFiles,
+		UnchangedFiles: event.UnchangedFiles,
+		DeletedFiles:   event.DeletedFiles,
+		FailedFiles:    event.FailedFiles,
+		ChunksEmbedded: event.ChunksEmbedded,
+	}
+}
+
+func ingestSummaryEvent(result IngestResult) *IngestEvent {
+	return &IngestEvent{
+		Directory:      result.Directory,
+		Scanned:        result.Scanned,
+		NewFiles:       result.NewFiles,
+		ChangedFiles:   result.ChangedFiles,
+		UnchangedFiles: result.UnchangedFiles,
+		DeletedFiles:   result.DeletedFiles,
+		FailedFiles:    result.FailedFiles,
+		ChunksEmbedded: result.ChunksEmbedded,
+	}
 }
 
 func copyHeaders(headers map[string]string) map[string]string {

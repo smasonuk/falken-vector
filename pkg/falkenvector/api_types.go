@@ -6,7 +6,12 @@ import (
 	"time"
 
 	"github.com/smasonuk/falken-core/pkg/falken"
+	"github.com/smasonuk/falken-vector/internal/rag"
 )
+
+// ErrNoIndex reports that no Falken Vector index exists for the configured
+// state directory.
+var ErrNoIndex = rag.ErrNoIndex
 
 // ModelConfig describes an OpenAI-compatible model endpoint.
 //
@@ -269,6 +274,45 @@ type StatusDocumentCounts struct {
 type StatusChunkCounts struct {
 	Active   int
 	Inactive int
+}
+
+// ChunkerMode selects the ingest chunking strategy. Empty defaults to
+// ChunkerAuto.
+type ChunkerMode string
+
+const (
+	ChunkerAuto     ChunkerMode = "auto"
+	ChunkerFixed    ChunkerMode = "fixed"
+	ChunkerMarkdown ChunkerMode = "markdown"
+	ChunkerText     ChunkerMode = "text"
+	ChunkerCode     ChunkerMode = "code"
+)
+
+// IngestRequest configures a source indexing run.
+//
+// Root defaults to ".". ChunkSize defaults to the CLI/internal ingest default.
+// ChunkOverlap defaults to the CLI default. ChunkerMode defaults to ChunkerAuto.
+type IngestRequest struct {
+	Root         string
+	Extensions   []string
+	ChunkSize    int
+	ChunkOverlap int
+	ChunkerMode  ChunkerMode
+	DryRun       bool
+	SyncSource   bool
+}
+
+// IngestResult summarizes an ingest run.
+type IngestResult struct {
+	Directory      string
+	Scanned        int
+	NewFiles       int
+	ChangedFiles   int
+	UnchangedFiles int
+	DeletedFiles   int
+	FailedFiles    int
+	ChunksEmbedded int
+	Warnings       []string
 }
 
 // CompactRequest configures vector database compaction.

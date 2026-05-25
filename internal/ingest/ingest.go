@@ -34,6 +34,7 @@ type Options struct {
 	Embedder     llm.Embedder
 	OpenVector   func(context.Context, string, int) (vectorstore.Store, error)
 	Now          func() time.Time
+	Progress     func(ProgressEvent)
 }
 
 type Summary struct {
@@ -45,6 +46,22 @@ type Summary struct {
 	FailedFiles    int
 	ChunksEmbedded int
 	StateDir       string
+}
+
+type ProgressEvent struct {
+	Directory   string
+	CurrentPath string
+	CurrentFile int
+	TotalFiles  int
+	Action      string
+
+	Scanned        int
+	NewFiles       int
+	ChangedFiles   int
+	UnchangedFiles int
+	DeletedFiles   int
+	FailedFiles    int
+	ChunksEmbedded int
 }
 
 type chunkReplacer interface {
@@ -108,6 +125,12 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 	}
 	summary := Summary{Scanned: len(files), StateDir: opts.Paths.StateDir}
 	progressf(opts, "found %d candidate files\n", len(files))
+	emitProgress(opts, ProgressEvent{
+		Directory:  sourceRoot,
+		Action:     "scanned",
+		Scanned:    len(files),
+		TotalFiles: len(files),
+	})
 	discoveredPaths := make(map[string]struct{}, len(files))
 	var vectorDB vectorstore.Store
 	pending := make([]indexedDocument, 0)
@@ -484,14 +507,34 @@ func progressFileDecision(opts Options, sourceRoot string, path string, decision
 			action = "would re-index"
 		}
 	}
-	progressf(opts, "%s file %d/%d: %s\n", action, current, total, displayPath(sourceRoot, path))
+	display := displayPath(sourceRoot, path)
+	emitProgress(opts, ProgressEvent{
+		Directory:   sourceRoot,
+		CurrentPath: display,
+		CurrentFile: current,
+		TotalFiles:  total,
+		Action:      action,
+	})
+	progressf(opts, "%s file %d/%d: %s\n", action, current, total, display)
 }
 
 func progressChunkEmbedded(opts Options, path string, current int, total int) {
 	if total <= 0 || !shouldPrintChunkProgress(current, total) {
 		return
 	}
+	emitProgress(opts, ProgressEvent{
+		CurrentPath: path,
+		CurrentFile: current,
+		TotalFiles:  total,
+		Action:      "embedded chunks",
+	})
 	progressf(opts, "embedded chunks for %s: %d/%d\n", path, current, total)
+}
+
+func emitProgress(opts Options, event ProgressEvent) {
+	if opts.Progress != nil {
+		opts.Progress(event)
+	}
 }
 
 func shouldPrintChunkProgress(current int, total int) bool {

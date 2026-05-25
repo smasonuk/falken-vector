@@ -14,6 +14,9 @@ import (
 func Run(ctx context.Context, opts Options) (final Result, err error) {
 	defer func() {
 		if err == nil {
+			if !opts.DisableDocumentPromotion {
+				final.DocumentPromotionPolicy = "auto"
+			}
 			populateResultToolMetrics(&final)
 			if final.ReadSourceCalls > 0 {
 				final.ReadSourceOverlapPolicy = string(normalizeReadSourceOverlapPolicy(opts.ReadSourceOverlapPolicy))
@@ -46,6 +49,7 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 	}
 	coveragePolicy := normalizeCoveragePolicy(opts)
 	thinPolicy := normalizeThinSourcePolicy(opts)
+	documentPromotionOpts := documentPromotionOptionsFromRunOptions(opts)
 
 	registry := NewCitationRegistry()
 	searchTool := NewSearchIndexTool(SearchToolOptions{
@@ -62,6 +66,7 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 		MaxTopK:               opts.MaxToolTopK,
 		MaxExpansionQueries:   opts.MaxBroadExpansionQueries,
 		MaxRetrievalCalls:     opts.MaxRetrievalCalls,
+		DocumentPromotion:     documentPromotionOpts,
 	})
 	agentTools := []falken.Tool{searchTool}
 	if opts.EnableReadSourceTool {
@@ -69,6 +74,13 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 			Registry:                 registry,
 			OverlapPolicy:            opts.ReadSourceOverlapPolicy,
 			MaxMergedReadSourceLines: opts.MaxMergedReadSourceLines,
+		}))
+	}
+	if !opts.DisableDocumentPromotion {
+		agentTools = append(agentTools, NewReadIndexDocumentTool(ReadDocumentToolOptions{
+			Registry:  registry,
+			MaxLines:  documentPromotionOpts.MaxDocumentReadLines,
+			MaxTokens: documentPromotionOpts.MaxDocumentReadTokens,
 		}))
 	}
 
@@ -89,7 +101,7 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 
 	agent, err := falken.NewAgent(ctx, falken.AgentConfig{
 		LLM:          opts.AgentLLM,
-		SystemPrompt: agentSystemPrompt(opts.EnableReadSourceTool),
+		SystemPrompt: agentSystemPrompt(opts.EnableReadSourceTool, !opts.DisableDocumentPromotion),
 		Tools:        agentTools,
 		Events:       events,
 		Permissions: falken.SimplePermissions{
@@ -264,13 +276,23 @@ func populateResultToolMetrics(result *Result) {
 	if result == nil {
 		return
 	}
-	searchCalls, retrievalCalls, readSourceStats := agentToolMetrics(*result)
+	searchCalls, retrievalCalls, readSourceStats, readDocumentStats := agentToolMetrics(*result)
 	result.SearchToolCalls = searchCalls
 	result.RetrievalCalls = retrievalCalls
 	result.ReadSourceCalls = readSourceStats.Calls
 	result.ReadSourceAlreadyCovered = readSourceStats.AlreadyCovered
 	result.ReadSourceMerges = readSourceStats.Merges
 	result.ReadSourceMergeTooLarge = readSourceStats.MergeTooLarge
+	result.DocumentReadCalls = readDocumentStats.Calls + readDocumentStats.AutoReads
+	result.DocumentReadWholeCalls = readDocumentStats.WholeCalls + readDocumentStats.AutoReads
+	result.DocumentReadRangeCalls = readDocumentStats.RangeCalls
+	result.DocumentReadParentCalls = readDocumentStats.ParentCalls
+	result.DocumentPromotionAutoReads = readDocumentStats.AutoReads
+	result.DocumentPromotionSkippedTooLarge = readDocumentStats.SkippedTooLarge
+	result.DocumentPromotionSkippedBudget = readDocumentStats.SkippedBudget
+	if readDocumentStats.Calls > 0 || readDocumentStats.AutoReads > 0 || result.DocumentPromotionPolicy != "" {
+		result.DocumentPromotionPolicy = "auto"
+	}
 }
 
 type readSourceMetricStats struct {
@@ -280,9 +302,20 @@ type readSourceMetricStats struct {
 	MergeTooLarge  int
 }
 
-func agentToolMetrics(result Result) (int, int, readSourceMetricStats) {
+type readDocumentMetricStats struct {
+	Calls           int
+	WholeCalls      int
+	RangeCalls      int
+	ParentCalls     int
+	AutoReads       int
+	SkippedTooLarge int
+	SkippedBudget   int
+}
+
+func agentToolMetrics(result Result) (int, int, readSourceMetricStats, readDocumentMetricStats) {
 	searchCalls := 0
 	readStats := readSourceMetricStats{}
+	documentStats := readDocumentMetricStats{}
 	if len(result.Trace.ToolCalls) != 0 {
 		for _, call := range result.Trace.ToolCalls {
 			if call.Name == SearchIndexToolName {
@@ -290,6 +323,9 @@ func agentToolMetrics(result Result) (int, int, readSourceMetricStats) {
 			}
 			if call.Name == ReadIndexSourceToolName {
 				readStats.Calls++
+			}
+			if call.Name == ReadIndexDocumentToolName {
+				documentStats.Calls++
 			}
 		}
 	} else {
@@ -299,6 +335,9 @@ func agentToolMetrics(result Result) (int, int, readSourceMetricStats) {
 			}
 			if name == ReadIndexSourceToolName {
 				readStats.Calls++
+			}
+			if name == ReadIndexDocumentToolName {
+				documentStats.Calls++
 			}
 		}
 	}
@@ -310,10 +349,21 @@ func agentToolMetrics(result Result) (int, int, readSourceMetricStats) {
 		switch toolResult.Name {
 		case SearchIndexToolName:
 			var payload struct {
-				RetrievalCalls int `json:"retrieval_calls"`
+				RetrievalCalls     int                         `json:"retrieval_calls"`
+				DocumentPromotions []DocumentPromotionDecision `json:"document_promotions"`
 			}
 			if json.Unmarshal(toolResult.Payload, &payload) == nil {
 				retrievalCalls += payload.RetrievalCalls
+				for _, decision := range payload.DocumentPromotions {
+					switch decision.Status {
+					case "ok":
+						documentStats.AutoReads++
+					case "too_large":
+						documentStats.SkippedTooLarge++
+					case "budget_exhausted":
+						documentStats.SkippedBudget++
+					}
+				}
 			}
 		case ReadIndexSourceToolName:
 			var payload struct {
@@ -330,9 +380,52 @@ func agentToolMetrics(result Result) (int, int, readSourceMetricStats) {
 			case "merge_too_large":
 				readStats.MergeTooLarge++
 			}
+		case ReadIndexDocumentToolName:
+			var payload struct {
+				Status string `json:"status"`
+				Mode   string `json:"mode"`
+			}
+			if json.Unmarshal(toolResult.Payload, &payload) != nil {
+				continue
+			}
+			if payload.Status == "too_large" {
+				documentStats.SkippedTooLarge++
+			}
+			switch payload.Mode {
+			case "range":
+				documentStats.RangeCalls++
+			case "parent":
+				documentStats.ParentCalls++
+			default:
+				documentStats.WholeCalls++
+			}
 		}
 	}
-	return searchCalls, retrievalCalls, readStats
+	return searchCalls, retrievalCalls, readStats, documentStats
+}
+
+func documentPromotionOptionsFromRunOptions(opts Options) DocumentPromotionOptions {
+	promotion := defaultDocumentPromotionOptions()
+	promotion.Enabled = !opts.DisableDocumentPromotion
+	if opts.MaxDocumentReadLines > 0 {
+		promotion.MaxDocumentReadLines = opts.MaxDocumentReadLines
+	}
+	if opts.MaxDocumentReadTokens > 0 {
+		promotion.MaxDocumentReadTokens = opts.MaxDocumentReadTokens
+	}
+	if opts.MaxDocumentReads > 0 {
+		promotion.MaxDocumentReads = opts.MaxDocumentReads
+	}
+	if opts.SmallDocumentLineLimit > 0 {
+		promotion.SmallFileLineLimit = opts.SmallDocumentLineLimit
+	}
+	if opts.DocumentDominantShare > 0 {
+		promotion.DominantDocShare = opts.DocumentDominantShare
+	}
+	if opts.DocumentMinHits > 0 {
+		promotion.MinHitsForDominantDoc = opts.DocumentMinHits
+	}
+	return promotion
 }
 
 func appendUniqueStrings(values []string, additions ...string) []string {

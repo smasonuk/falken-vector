@@ -651,6 +651,42 @@ func TestRunExposesReadSourceToolWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestRunExposesReadDocumentToolByDefault(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{AssistantText: "I do not know.", FinishReason: falken.FinishReasonStop},
+	}}
+	_, err := Run(context.Background(), testRunOptions(t, llm))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !requestHasTool(llm.requests[0], ReadIndexDocumentToolName) {
+		t.Fatalf("tools = %+v, want read_index_document by default", llm.requests[0].Tools)
+	}
+	if !strings.Contains(llm.requests[0].Messages[0].Content, "read_index_document") {
+		t.Fatalf("system prompt = %q, want read_index_document instructions", llm.requests[0].Messages[0].Content)
+	}
+}
+
+func TestRunHidesReadDocumentToolWhenDocumentPromotionDisabled(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{AssistantText: "I do not know.", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.DisableDocumentPromotion = true
+	_, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if requestHasTool(llm.requests[0], ReadIndexDocumentToolName) {
+		t.Fatalf("tools = %+v, read_index_document should be hidden when disabled", llm.requests[0].Tools)
+	}
+	if strings.Contains(llm.requests[0].Messages[0].Content, "read_index_document") {
+		t.Fatalf("system prompt = %q, did not want read_index_document instructions", llm.requests[0].Messages[0].Content)
+	}
+}
+
 func TestRunThinSourceNudgeExpandsShortCitedSource(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	sourcePath := filepath.Join(t.TempDir(), "alphafold.md")

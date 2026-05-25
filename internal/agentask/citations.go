@@ -48,6 +48,11 @@ func (r *CitationRegistry) RegisterWithProvenance(chunk rag.RetrievedChunk, prov
 		EndLine:      chunk.Chunk.EndLine,
 		Text:         chunk.Chunk.ChunkText,
 		Score:        chunk.Score,
+		Chunker:      chunk.Chunk.Chunker,
+		Language:     chunk.Chunk.Language,
+		HeadingPath:  append([]string(nil), chunk.Chunk.HeadingPath...),
+		SymbolName:   chunk.Chunk.SymbolName,
+		SymbolKind:   chunk.Chunk.SymbolKind,
 	}
 	if provenance != nil {
 		copied := *provenance

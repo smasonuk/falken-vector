@@ -35,6 +35,11 @@ type SourceChunk struct {
 	Text         string
 	Score        float32
 	Provenance   *SourceProvenance
+	Chunker      string
+	Language     string
+	HeadingPath  []string
+	SymbolName   string
+	SymbolKind   string
 }
 
 type SourceProvenance struct {
@@ -89,6 +94,11 @@ func SourceChunksFromRetrieved(chunks []RetrievedChunk) []SourceChunk {
 			EndLine:      chunk.Chunk.EndLine,
 			Text:         chunk.Chunk.ChunkText,
 			Score:        chunk.Score,
+			Chunker:      chunk.Chunk.Chunker,
+			Language:     chunk.Chunk.Language,
+			HeadingPath:  append([]string(nil), chunk.Chunk.HeadingPath...),
+			SymbolName:   chunk.Chunk.SymbolName,
+			SymbolKind:   chunk.Chunk.SymbolKind,
 		})
 	}
 	return out

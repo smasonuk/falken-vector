@@ -70,29 +70,45 @@ type Options struct {
 	// Values <= 0 use the default.
 	MaxMergedReadSourceLines int
 
+	DisableDocumentPromotion bool
+	MaxDocumentReadLines     int
+	MaxDocumentReadTokens    int
+	MaxDocumentReads         int
+	SmallDocumentLineLimit   int
+	DocumentDominantShare    float64
+	DocumentMinHits          int
+
 	Events falken.EventSink
 }
 
 type Result struct {
-	Answer                   string
-	Sources                  []rag.SourceChunk
-	CitationNotes            []string
-	CitationWarnings         []string
-	CitationValid            bool
-	CoverageWarnings         []string
-	CoverageNudged           bool
-	ThinSourceWarnings       []string
-	ThinSourceNudged         bool
-	Retried                  bool
-	ToolCalls                []string
-	Trace                    AgentTrace
-	SearchToolCalls          int
-	RetrievalCalls           int
-	ReadSourceCalls          int
-	ReadSourceAlreadyCovered int
-	ReadSourceMerges         int
-	ReadSourceMergeTooLarge  int
-	ReadSourceOverlapPolicy  string
+	Answer                           string
+	Sources                          []rag.SourceChunk
+	CitationNotes                    []string
+	CitationWarnings                 []string
+	CitationValid                    bool
+	CoverageWarnings                 []string
+	CoverageNudged                   bool
+	ThinSourceWarnings               []string
+	ThinSourceNudged                 bool
+	Retried                          bool
+	ToolCalls                        []string
+	Trace                            AgentTrace
+	SearchToolCalls                  int
+	RetrievalCalls                   int
+	ReadSourceCalls                  int
+	ReadSourceAlreadyCovered         int
+	ReadSourceMerges                 int
+	ReadSourceMergeTooLarge          int
+	ReadSourceOverlapPolicy          string
+	DocumentReadCalls                int
+	DocumentReadWholeCalls           int
+	DocumentReadRangeCalls           int
+	DocumentReadParentCalls          int
+	DocumentPromotionAutoReads       int
+	DocumentPromotionSkippedTooLarge int
+	DocumentPromotionSkippedBudget   int
+	DocumentPromotionPolicy          string
 }
 
 // AgentTrace records structured tool activity for an agent ask run.

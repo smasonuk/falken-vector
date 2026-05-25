@@ -159,7 +159,7 @@ falkengo ask --agent "summarize information on alphafold or anything related to 
   --show-agent-tools
 ```
 
-`--show-agent-tools` prints each `agent tool call` and compact `agent tool result` without dumping source text. Search results include `new` sources added by that call, `duplicates` already seen, `docs` touched, and actual `retrievals` performed. Broad searches may also show `agent seed query plan`, `agent broad expansion queries`, and `agent suggested follow-up queries`; if the tool normalizes a repeated-term query, the result shows the normalized query and original text. A `agent thin-source nudge` line means the agent is expanding very short cited spans with `read_index_source` before finalizing.
+`--show-agent-tools` prints each `agent tool call` and compact `agent tool result` without dumping source text. Search results include `new` sources added by that call, `duplicates` already seen, `docs` touched, and actual `retrievals` performed. Broad searches may also show `agent seed query plan`, `agent broad expansion queries`, `agent suggested follow-up queries`, and document promotion decisions; if the tool normalizes a repeated-term query, the result shows the normalized query and original text. A `agent thin-source nudge` line means the agent is expanding very short cited spans with `read_index_source` before finalizing.
 
 Agent answers default to `--sources both`: `Sources cited` lists sources referenced by the final answer, while `Other sources available to the agent` shows retrieved but uncited evidence. Use `--sources cited` for the cited-only view, `--sources all` for every available source in one list, and `--show-source-provenance` to print first-introduced query details per source. If an uncited source is fully contained by an expanded cited range, it is marked as covered by that cited source.
 
@@ -180,6 +180,28 @@ Source audit:
 ```
 
 `available to agent` is the unique source set registered from tool searches. `cited in answer` is the subset referenced in the final text, and `uncited` is the difference. `search tool calls` counts outer `search_index` calls; `retrieval calls` can be higher because broad search may perform internal expansion retrievals. `introduced by query` counts the first query that introduced each source and appears when provenance is available under `--show-agent-tools`.
+
+### Agent document promotion
+
+`search_index` returns chunks, but it also reports document-level matches so the agent can see when many chunks are evidence from one file. For broad questions, small or dominant files may be promoted automatically: the agent reads the whole registered file and expands the same source number so final citations still point at `[source N]`.
+
+`read_index_document` is the larger-context companion to `read_index_source`. It can read a whole registered file, a requested registered line range, or parent context such as a Markdown heading section or code symbol. It cannot read arbitrary paths: the only input is a `source_number` that was already returned by `search_index`.
+
+Debug output shows when a document was promoted:
+
+```text
+agent document promotion: reading whole [source 12] alphafold/meetings/sdb - May 18 2026.md:1-206
+reason: broad question; 9/20 sources from same document; file 206 lines <= 400-line cap
+```
+
+If a file is too large, the tool returns a compact `too_large` result with line/token stats and no document text. Use these controls while debugging:
+
+```text
+--no-agent-document-promotion
+--max-agent-document-lines
+--max-agent-document-tokens
+--max-agent-document-reads
+```
 
 `read_index_source` is an optional agent tool for expanding context around an already returned source number. It cannot read arbitrary paths: the agent must pass a registered `source_number`, and `context_lines` defaults to 20 and caps at 100. Broad summary questions auto-enable the tool unless `--no-agent-read-source-tool` is set; `--agent-read-source-tool` enables it explicitly. Expanded ranges broaden the existing source number so final citations keep pointing at `[source N]`.
 

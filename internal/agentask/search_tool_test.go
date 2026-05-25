@@ -3,6 +3,7 @@ package agentask
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -687,6 +688,210 @@ func TestSearchIndexToolPayloadIsValidJSON(t *testing.T) {
 	}
 	if payload.QueryNormalized || payload.OriginalQuery != "" {
 		t.Fatalf("payload = %+v, did not want original query when unchanged", payload)
+	}
+}
+
+func TestBuildDocumentMatchSummariesAggregatesRangesAndStats(t *testing.T) {
+	file := writeReadSourceFileNamed(t, "meeting.md", strings.Join([]string{
+		"# AlphaFold",
+		"one",
+		"two",
+		"three",
+		"four",
+		"five",
+		"six",
+		"seven",
+		"eight",
+		"nine",
+	}, "\n"))
+	sources := []rag.SourceChunk{
+		{SourceNumber: 1, Path: file, StartLine: 1, EndLine: 3, Provenance: &rag.SourceProvenance{Query: "AlphaFold"}},
+		{SourceNumber: 2, Path: file, StartLine: 4, EndLine: 5, Provenance: &rag.SourceProvenance{Query: "folding"}},
+		{SourceNumber: 3, Path: file, StartLine: 8, EndLine: 9, Provenance: &rag.SourceProvenance{Query: "AlphaFold"}},
+	}
+	matches := BuildDocumentMatchSummaries(sources, 1, 6)
+	if len(matches) != 1 {
+		t.Fatalf("matches = %+v, want one document summary", matches)
+	}
+	match := matches[0]
+	if match.HitCount != 3 || match.NewHitCount != 2 || match.TopKShare != 0.5 {
+		t.Fatalf("match counts = %+v, want hit/new/share populated", match)
+	}
+	if match.MinStartLine != 1 || match.MaxEndLine != 9 {
+		t.Fatalf("line span = %d-%d, want 1-9", match.MinStartLine, match.MaxEndLine)
+	}
+	if len(match.MergedRetrievedRanges) != 2 || match.MergedRetrievedRanges[0] != (Range{StartLine: 1, EndLine: 5}) || match.MergedRetrievedRanges[1] != (Range{StartLine: 8, EndLine: 9}) {
+		t.Fatalf("merged ranges = %+v, want 1-5 and 8-9", match.MergedRetrievedRanges)
+	}
+	if match.CoveredLineCount != 7 || match.ScatteredHitCount != 2 {
+		t.Fatalf("coverage = %d scattered = %d, want 7/2", match.CoveredLineCount, match.ScatteredHitCount)
+	}
+	if match.FileLineCount != 10 || match.FileByteCount == 0 || match.EstimatedFileTokens == 0 {
+		t.Fatalf("file stats = lines %d bytes %d tokens %d, want populated", match.FileLineCount, match.FileByteCount, match.EstimatedFileTokens)
+	}
+	if strings.Join(match.Queries, ",") != "AlphaFold,folding" {
+		t.Fatalf("queries = %+v, want sorted introducing queries", match.Queries)
+	}
+}
+
+func TestSearchIndexToolPayloadIncludesDocumentMatchesWithoutDocumentText(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	fileA := writeReadSourceFileNamed(t, "meeting.md", "alpha one\nprivate full document line\nalpha two\n")
+	fileB := writeReadSourceFileNamed(t, "other.md", "other file\n")
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths: paths,
+		Store: manifest.EmptyStore{},
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 3,
+		},
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			one := testRetrievedChunk("chunk-1", fileA, "alpha one", "indexed")
+			one.Chunk.StartLine = 1
+			one.Chunk.EndLine = 1
+			two := testRetrievedChunk("chunk-2", fileA, "alpha two", "indexed")
+			two.Chunk.StartLine = 3
+			two.Chunk.EndLine = 3
+			three := testRetrievedChunk("chunk-3", fileB, "other", "indexed")
+			three.Chunk.StartLine = 1
+			three.Chunk.EndLine = 1
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{one, two, three},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"alpha"}`)
+	payload := decodeSearchPayload(t, result.Payload)
+	if len(payload.DocumentMatches) != 2 {
+		t.Fatalf("document matches = %+v, want separate summaries for two files", payload.DocumentMatches)
+	}
+	if payload.DocumentMatches[0].HitCount != 2 || len(payload.DocumentMatches[0].SourceNumbers) != 2 {
+		t.Fatalf("top document match = %+v, want two source hits", payload.DocumentMatches[0])
+	}
+	if strings.Contains(string(result.Payload), "private full document line") || strings.Contains(result.Content, "private full document line") {
+		t.Fatalf("tool output leaked full document text: content=%q payload=%s", result.Content, string(result.Payload))
+	}
+}
+
+func TestSearchIndexToolAutoPromotesBroadSmallDominantDocument(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	file := writeReadSourceFileNamed(t, "sdb.md", "line 1\nAlphaFold outputs\nline 3\nfolding workflows\n")
+	registry := NewCitationRegistry()
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:        paths,
+		Store:        manifest.EmptyStore{},
+		Registry:     registry,
+		UserQuestion: "summarize anything related to AlphaFold folding",
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 2,
+		},
+		DocumentPromotion: defaultDocumentPromotionOptions(),
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			one := testRetrievedChunk("chunk-1", file, "AlphaFold outputs", "indexed")
+			one.Chunk.StartLine = 2
+			one.Chunk.EndLine = 2
+			two := testRetrievedChunk("chunk-2", file, "folding workflows", "indexed")
+			two.Chunk.StartLine = 4
+			two.Chunk.EndLine = 4
+			return rag.RetrieveResult{
+				Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+				Chunks: []rag.RetrievedChunk{one, two},
+			}, nil
+		},
+	})
+	result := executeSearchTool(t, tool, `{"query":"AlphaFold","strategy":"broad"}`)
+	payload := decodeSearchPayload(t, result.Payload)
+	if len(payload.DocumentPromotions) != 1 || payload.DocumentPromotions[0].Status != "ok" {
+		t.Fatalf("promotions = %+v, want one successful promotion", payload.DocumentPromotions)
+	}
+	source, ok := registry.SourceByNumber(1)
+	if !ok || source.StartLine != 1 || source.EndLine != 4 {
+		t.Fatalf("source 1 = %+v ok=%v, want expanded whole file", source, ok)
+	}
+	if !strings.Contains(result.Content, "whole document context") || !strings.Contains(result.Content, "line 1") {
+		t.Fatalf("content = %q, want promoted whole document text for agent", result.Content)
+	}
+}
+
+func TestSearchIndexToolDocumentPromotionCapAppliesAcrossSearches(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	fileA := writeReadSourceFileNamed(t, "one.md", "a1\na2\n")
+	fileB := writeReadSourceFileNamed(t, "two.md", "b1\nb2\n")
+	calls := 0
+	promotionOpts := defaultDocumentPromotionOptions()
+	promotionOpts.MaxDocumentReads = 1
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:        paths,
+		Store:        manifest.EmptyStore{},
+		Registry:     NewCitationRegistry(),
+		UserQuestion: "summarize anything related",
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 2,
+		},
+		DocumentPromotion: promotionOpts,
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			calls++
+			file := fileA
+			prefix := "a"
+			if calls > 1 {
+				file = fileB
+				prefix = "b"
+			}
+			one := testRetrievedChunk(prefix+"-1", file, prefix+"1", "indexed")
+			one.Chunk.StartLine = 1
+			one.Chunk.EndLine = 1
+			two := testRetrievedChunk(prefix+"-2", file, prefix+"2", "indexed")
+			two.Chunk.StartLine = 2
+			two.Chunk.EndLine = 2
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}, Chunks: []rag.RetrievedChunk{one, two}}, nil
+		},
+	})
+	first := executeSearchTool(t, tool, `{"query":"one","strategy":"broad"}`)
+	second := executeSearchTool(t, tool, `{"query":"two","strategy":"broad"}`)
+	firstPayload := decodeSearchPayload(t, first.Payload)
+	secondPayload := decodeSearchPayload(t, second.Payload)
+	if len(firstPayload.DocumentPromotions) != 1 || firstPayload.DocumentPromotions[0].Status != "ok" {
+		t.Fatalf("first promotions = %+v, want ok", firstPayload.DocumentPromotions)
+	}
+	if len(secondPayload.DocumentPromotions) != 1 || secondPayload.DocumentPromotions[0].Status != "budget_exhausted" {
+		t.Fatalf("second promotions = %+v, want budget exhausted", secondPayload.DocumentPromotions)
+	}
+}
+
+func TestSearchIndexToolPromotesFileSeenAcrossSearchCalls(t *testing.T) {
+	paths := searchToolTestPaths(t, false)
+	file := writeReadSourceFileNamed(t, "repeat.md", "first\nsecond\nthird\n")
+	calls := 0
+	tool := NewSearchIndexTool(SearchToolOptions{
+		Paths:        paths,
+		Store:        manifest.EmptyStore{},
+		Registry:     NewCitationRegistry(),
+		UserQuestion: "summarize anything related",
+		RetrievalDefaults: rag.RetrieveOptions{
+			Mode: rag.RetrievalModeLexical,
+			TopK: 1,
+		},
+		DocumentPromotion: defaultDocumentPromotionOptions(),
+		RetrieveWithPlan: func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+			calls++
+			chunk := testRetrievedChunk(fmt.Sprintf("repeat-%d", calls), file, fmt.Sprintf("line %d", calls), "indexed")
+			chunk.Chunk.StartLine = calls
+			chunk.Chunk.EndLine = calls
+			return rag.RetrieveResult{Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}}, Chunks: []rag.RetrievedChunk{chunk}}, nil
+		},
+	})
+	first := executeSearchTool(t, tool, `{"query":"first","strategy":"broad"}`)
+	second := executeSearchTool(t, tool, `{"query":"second","strategy":"broad"}`)
+	firstPayload := decodeSearchPayload(t, first.Payload)
+	secondPayload := decodeSearchPayload(t, second.Payload)
+	if len(firstPayload.DocumentPromotions) != 0 {
+		t.Fatalf("first promotions = %+v, want no single-hit promotion", firstPayload.DocumentPromotions)
+	}
+	if len(secondPayload.DocumentPromotions) != 1 || secondPayload.DocumentPromotions[0].Status != "ok" {
+		t.Fatalf("second promotions = %+v, want repeat-file promotion", secondPayload.DocumentPromotions)
 	}
 }
 

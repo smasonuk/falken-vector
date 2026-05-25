@@ -28,9 +28,22 @@ For a normal expansion, continue citing the original [source N].
 If read_index_source says the requested source is already covered by another source, cite the covering source number returned by the tool.
 If read_index_source says the requested source was merged into another expanded source, cite the merged or covering source number returned by the tool.`
 
-func agentSystemPrompt(enableReadSourceTool bool) string {
+const readDocumentToolPrompt = `
+
+Use read_index_document when the user asks for a summary, overview, audit, timeline, comparison, or "anything related to X"; many returned sources are from the same file; evidence is scattered across a meeting note, transcript, README, design doc, or markdown file; chronology or earlier/later context matters; retrieved snippets appear incomplete or contradictory; or you need to check whether the rest of a small file contains relevant material.
+Do not use read_index_document when the question is a precise lookup and a retrieved chunk answers it, the file is too large and a section/range read would be better, only one weak hit appears in the file, or you already have enough cited evidence.
+Use read_index_source for local expansion around a source.
+Use read_index_document for whole-file, parent-section, or large-range document context.
+Never invent paths. read_index_document only accepts source_number values returned by search_index.
+For broad questions, after searching, consider whether a dominant small document should be read with read_index_document before finalizing.`
+
+func agentSystemPrompt(enableReadSourceTool bool, enableReadDocumentTool bool) string {
+	prompt := AgentSystemPrompt
 	if enableReadSourceTool {
-		return AgentSystemPrompt + readSourceToolPrompt
+		prompt += readSourceToolPrompt
 	}
-	return AgentSystemPrompt
+	if enableReadDocumentTool {
+		prompt += readDocumentToolPrompt
+	}
+	return prompt
 }

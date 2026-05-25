@@ -45,6 +45,10 @@ func newAskCommand(opts *options) *cobra.Command {
 	var maxAgentSearches int
 	var maxAgentExpansionQueries int
 	var maxAgentRetrievals int
+	var noAgentDocumentPromotion bool
+	var maxAgentDocumentLines int
+	var maxAgentDocumentTokens int
+	var maxAgentDocumentReads int
 	var retrievalFlags retrievalFlagValues
 	var sourceFlags sourceFilterFlagValues
 	cmd := &cobra.Command{
@@ -108,6 +112,15 @@ func newAskCommand(opts *options) *cobra.Command {
 				if maxMergedReadSourceLines < 0 {
 					return errors.New("--max-merged-read-source-lines must be >= 0")
 				}
+				if maxAgentDocumentLines < 0 {
+					return errors.New("--max-agent-document-lines must be >= 0")
+				}
+				if maxAgentDocumentTokens < 0 {
+					return errors.New("--max-agent-document-tokens must be >= 0")
+				}
+				if maxAgentDocumentReads < 0 {
+					return errors.New("--max-agent-document-reads must be >= 0")
+				}
 				effectiveReadSourceTool, err := agentReadSourceToolFromFlags(agentReadSourceTool, noAgentReadSourceTool, cmd.Flags().Changed("agent-read-source-tool"), args[0])
 				if err != nil {
 					return err
@@ -142,6 +155,10 @@ func newAskCommand(opts *options) *cobra.Command {
 					EnableReadSourceTool:     effectiveReadSourceTool,
 					ReadSourceOverlapPolicy:  overlapPolicy,
 					MaxMergedReadSourceLines: maxMergedReadSourceLines,
+					DisableDocumentPromotion: noAgentDocumentPromotion,
+					MaxDocumentReadLines:     maxAgentDocumentLines,
+					MaxDocumentReadTokens:    maxAgentDocumentTokens,
+					MaxDocumentReads:         maxAgentDocumentReads,
 				}
 				if showAgentTools {
 					toolPrinter := newAgentToolPrinter()
@@ -165,13 +182,21 @@ func newAskCommand(opts *options) *cobra.Command {
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
 				printAnswerWithSourceModeAndAudit(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode, showSourceProvenance, showAgentTools, sourceAuditMetrics{
-					SearchToolCalls:          result.SearchToolCalls,
-					RetrievalCalls:           result.RetrievalCalls,
-					ReadSourceCalls:          result.ReadSourceCalls,
-					ReadSourceAlreadyCovered: result.ReadSourceAlreadyCovered,
-					ReadSourceMerges:         result.ReadSourceMerges,
-					ReadSourceMergeTooLarge:  result.ReadSourceMergeTooLarge,
-					ReadSourceOverlapPolicy:  result.ReadSourceOverlapPolicy,
+					SearchToolCalls:                  result.SearchToolCalls,
+					RetrievalCalls:                   result.RetrievalCalls,
+					ReadSourceCalls:                  result.ReadSourceCalls,
+					ReadSourceAlreadyCovered:         result.ReadSourceAlreadyCovered,
+					ReadSourceMerges:                 result.ReadSourceMerges,
+					ReadSourceMergeTooLarge:          result.ReadSourceMergeTooLarge,
+					ReadSourceOverlapPolicy:          result.ReadSourceOverlapPolicy,
+					DocumentReadCalls:                result.DocumentReadCalls,
+					DocumentReadWholeCalls:           result.DocumentReadWholeCalls,
+					DocumentReadRangeCalls:           result.DocumentReadRangeCalls,
+					DocumentReadParentCalls:          result.DocumentReadParentCalls,
+					DocumentPromotionAutoReads:       result.DocumentPromotionAutoReads,
+					DocumentPromotionSkippedTooLarge: result.DocumentPromotionSkippedTooLarge,
+					DocumentPromotionSkippedBudget:   result.DocumentPromotionSkippedBudget,
+					DocumentPromotionPolicy:          result.DocumentPromotionPolicy,
 				})
 				return nil
 			}
@@ -246,6 +271,10 @@ func newAskCommand(opts *options) *cobra.Command {
 	cmd.Flags().IntVar(&maxAgentSearches, "max-agent-searches", 6, "maximum number of search_index calls allowed during one agent ask run")
 	cmd.Flags().IntVar(&maxAgentExpansionQueries, "max-agent-expansion-queries", 2, "maximum internal broad expansion queries per search_index call; 0 disables expansion")
 	cmd.Flags().IntVar(&maxAgentRetrievals, "max-agent-retrievals", 0, "maximum actual retrieval calls across agent search_index calls; 0 leaves uncapped")
+	cmd.Flags().BoolVar(&noAgentDocumentPromotion, "no-agent-document-promotion", false, "disable automatic document promotion and hide read_index_document in agent mode")
+	cmd.Flags().IntVar(&maxAgentDocumentLines, "max-agent-document-lines", 500, "maximum lines returned by read_index_document and automatic document promotion")
+	cmd.Flags().IntVar(&maxAgentDocumentTokens, "max-agent-document-tokens", 25000, "maximum estimated tokens returned by read_index_document and automatic document promotion")
+	cmd.Flags().IntVar(&maxAgentDocumentReads, "max-agent-document-reads", 2, "maximum automatic document reads per agent ask run")
 	cmd.Flags().BoolVar(&agentCoverageNudge, "agent-coverage-nudge", false, "enable broad-question coverage nudging in agent mode")
 	cmd.Flags().BoolVar(&noAgentCoverageNudge, "no-agent-coverage-nudge", false, "disable broad-question coverage nudging in agent mode")
 	cmd.Flags().IntVar(&minAgentSearches, "min-agent-searches", 0, "minimum successful search_index calls for broad agent questions")
@@ -272,13 +301,21 @@ func printAnswerWithSourceMode(w io.Writer, answer string, sources []rag.SourceC
 }
 
 type sourceAuditMetrics struct {
-	SearchToolCalls          int
-	RetrievalCalls           int
-	ReadSourceCalls          int
-	ReadSourceAlreadyCovered int
-	ReadSourceMerges         int
-	ReadSourceMergeTooLarge  int
-	ReadSourceOverlapPolicy  string
+	SearchToolCalls                  int
+	RetrievalCalls                   int
+	ReadSourceCalls                  int
+	ReadSourceAlreadyCovered         int
+	ReadSourceMerges                 int
+	ReadSourceMergeTooLarge          int
+	ReadSourceOverlapPolicy          string
+	DocumentReadCalls                int
+	DocumentReadWholeCalls           int
+	DocumentReadRangeCalls           int
+	DocumentReadParentCalls          int
+	DocumentPromotionAutoReads       int
+	DocumentPromotionSkippedTooLarge int
+	DocumentPromotionSkippedBudget   int
+	DocumentPromotionPolicy          string
 }
 
 func printAnswerWithSourceModeAndAudit(w io.Writer, answer string, sources []rag.SourceChunk, sourcesMode string, showProvenance, showAuditProvenance bool, auditMetrics sourceAuditMetrics) {
@@ -480,6 +517,30 @@ func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk, sho
 		if metrics.ReadSourceMergeTooLarge > 0 {
 			fmt.Fprintf(w, "- read source merge too large: %d\n", metrics.ReadSourceMergeTooLarge)
 		}
+	}
+	if metrics.DocumentReadCalls > 0 {
+		fmt.Fprintf(w, "- document read calls: %d\n", metrics.DocumentReadCalls)
+		if metrics.DocumentReadWholeCalls > 0 {
+			fmt.Fprintf(w, "- document read whole calls: %d\n", metrics.DocumentReadWholeCalls)
+		}
+		if metrics.DocumentReadRangeCalls > 0 {
+			fmt.Fprintf(w, "- document read range calls: %d\n", metrics.DocumentReadRangeCalls)
+		}
+		if metrics.DocumentReadParentCalls > 0 {
+			fmt.Fprintf(w, "- document read parent calls: %d\n", metrics.DocumentReadParentCalls)
+		}
+	}
+	if metrics.DocumentPromotionAutoReads > 0 {
+		fmt.Fprintf(w, "- document promotion auto reads: %d\n", metrics.DocumentPromotionAutoReads)
+	}
+	if metrics.DocumentPromotionSkippedTooLarge > 0 {
+		fmt.Fprintf(w, "- document promotion skipped too large: %d\n", metrics.DocumentPromotionSkippedTooLarge)
+	}
+	if metrics.DocumentPromotionSkippedBudget > 0 {
+		fmt.Fprintf(w, "- document promotion skipped budget: %d\n", metrics.DocumentPromotionSkippedBudget)
+	}
+	if strings.TrimSpace(metrics.DocumentPromotionPolicy) != "" && (metrics.DocumentReadCalls > 0 || metrics.DocumentPromotionAutoReads > 0 || metrics.DocumentPromotionSkippedTooLarge > 0 || metrics.DocumentPromotionSkippedBudget > 0) {
+		fmt.Fprintf(w, "- document promotion policy: %s\n", metrics.DocumentPromotionPolicy)
 	}
 	if showProvenanceSummary {
 		printSourceAuditProvenanceSummary(w, sources)

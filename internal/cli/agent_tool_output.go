@@ -135,6 +135,10 @@ func formatAgentToolResult(result falken.ToolResult) []string {
 		if lines, ok := formatAgentReadSourceToolResult(result); ok {
 			return lines
 		}
+	case agentask.ReadIndexDocumentToolName:
+		if lines, ok := formatAgentReadDocumentToolResult(result); ok {
+			return lines
+		}
 	}
 	status, success := agentToolResultStatus(result)
 	out := []string{fmt.Sprintf("agent tool result: %s %s", result.Name, status)}
@@ -160,15 +164,27 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 			Mode    string   `json:"mode"`
 			Queries []string `json:"queries"`
 		} `json:"seed_query_plan"`
-		Sources          []json.RawMessage `json:"sources"`
-		ExpansionQueries []string          `json:"expansion_queries"`
-		SuggestedQueries []string          `json:"suggested_queries"`
-		NewSources       int               `json:"new_sources"`
-		DuplicateSources int               `json:"duplicate_sources"`
-		UniqueDocuments  int               `json:"unique_documents"`
-		RetrievalCalls   int               `json:"retrieval_calls"`
-		Warnings         []string          `json:"warnings"`
-		Error            string            `json:"error"`
+		Sources            []json.RawMessage `json:"sources"`
+		ExpansionQueries   []string          `json:"expansion_queries"`
+		SuggestedQueries   []string          `json:"suggested_queries"`
+		NewSources         int               `json:"new_sources"`
+		DuplicateSources   int               `json:"duplicate_sources"`
+		UniqueDocuments    int               `json:"unique_documents"`
+		RetrievalCalls     int               `json:"retrieval_calls"`
+		DocumentPromotions []struct {
+			SourceNumber    int    `json:"source_number"`
+			Path            string `json:"path"`
+			Status          string `json:"status"`
+			Reason          string `json:"reason"`
+			StartLine       int    `json:"start_line"`
+			EndLine         int    `json:"end_line"`
+			Lines           int    `json:"lines"`
+			EstimatedTokens int    `json:"estimated_tokens"`
+			MaxLines        int    `json:"max_lines"`
+			MaxTokens       int    `json:"max_tokens"`
+		} `json:"document_promotions"`
+		Warnings []string `json:"warnings"`
+		Error    string   `json:"error"`
 	}
 	if len(result.Payload) == 0 || json.Unmarshal(result.Payload, &payload) != nil {
 		return nil, false
@@ -211,6 +227,84 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 			out = append(out, fmt.Sprintf("  %d. %s", i+1, query))
 		}
 	}
+	for _, promotion := range payload.DocumentPromotions {
+		source := rag.SourceChunk{
+			SourceNumber: promotion.SourceNumber,
+			Path:         promotion.Path,
+			StartLine:    promotion.StartLine,
+			EndLine:      promotion.EndLine,
+		}
+		switch promotion.Status {
+		case "ok":
+			out = append(out, fmt.Sprintf("agent document promotion: reading whole %s", SourceReference(source)))
+			if promotion.Lines > 0 {
+				out[len(out)-1] += fmt.Sprintf(", lines=%d, estimated_tokens=%d", promotion.Lines, promotion.EstimatedTokens)
+			}
+			if promotion.Reason != "" {
+				out = append(out, "reason: "+promotion.Reason)
+			}
+		case "too_large":
+			out = append(out, fmt.Sprintf("agent document promotion: skipped too_large %s, lines=%d, estimated_tokens=%d, max_tokens=%d", SourceReference(source), promotion.Lines, promotion.EstimatedTokens, promotion.MaxTokens))
+			if promotion.Reason != "" {
+				out = append(out, "reason: "+promotion.Reason)
+			}
+		case "budget_exhausted":
+			out = append(out, fmt.Sprintf("agent document promotion: skipped budget %s", SourceReference(source)))
+			if promotion.Reason != "" {
+				out = append(out, "reason: "+promotion.Reason)
+			}
+		}
+	}
+	for _, warning := range payload.Warnings {
+		out = append(out, fmt.Sprintf("agent tool warning: %s: %s", result.Name, warning))
+	}
+	if payload.Error != "" {
+		out = append(out, fmt.Sprintf("agent tool error: %s: %s", result.Name, payload.Error))
+	}
+	return out, true
+}
+
+func formatAgentReadDocumentToolResult(result falken.ToolResult) ([]string, bool) {
+	var payload struct {
+		Success         bool     `json:"success"`
+		Status          string   `json:"status"`
+		SourceNumber    int      `json:"source_number"`
+		Path            string   `json:"path"`
+		Mode            string   `json:"mode"`
+		ParentKind      string   `json:"parent_kind"`
+		StartLine       int      `json:"start_line"`
+		EndLine         int      `json:"end_line"`
+		Lines           int      `json:"lines"`
+		EstimatedTokens int      `json:"estimated_tokens"`
+		MaxTokens       int      `json:"max_tokens"`
+		Warnings        []string `json:"warnings"`
+		Error           string   `json:"error"`
+	}
+	if len(result.Payload) == 0 || json.Unmarshal(result.Payload, &payload) != nil {
+		return nil, false
+	}
+	status := payload.Status
+	if status == "" {
+		status, _ = agentToolResultStatus(result)
+	}
+	source := rag.SourceChunk{
+		SourceNumber: payload.SourceNumber,
+		Path:         payload.Path,
+		StartLine:    payload.StartLine,
+		EndLine:      payload.EndLine,
+	}
+	mode := payload.Mode
+	if mode == "" {
+		mode = "whole"
+	}
+	summary := fmt.Sprintf("agent tool result: %s %s, %s, mode=%s, lines=%d, estimated_tokens=%d", result.Name, status, SourceReference(source), mode, payload.Lines, payload.EstimatedTokens)
+	if status == "too_large" {
+		summary = fmt.Sprintf("agent tool result: %s too_large, %s, lines=%d, estimated_tokens=%d, max_tokens=%d", result.Name, SourceReference(source), payload.Lines, payload.EstimatedTokens, payload.MaxTokens)
+	}
+	if payload.ParentKind != "" && mode == "parent" {
+		summary += ", parent_kind=" + payload.ParentKind
+	}
+	out := []string{summary}
 	for _, warning := range payload.Warnings {
 		out = append(out, fmt.Sprintf("agent tool warning: %s: %s", result.Name, warning))
 	}

@@ -109,6 +109,40 @@ func TestFormatAgentToolResultSearchIndexSummary(t *testing.T) {
 	}
 }
 
+func TestFormatAgentToolResultSearchIndexDocumentPromotionOmitsText(t *testing.T) {
+	lines := formatAgentToolResult(falken.ToolResult{
+		Name: "search_index",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "ok",
+			"query": "AlphaFold",
+			"top_k": 12,
+			"sources": [{"text": "source text that must not leak"}],
+			"document_promotions": [{
+				"source_number": 12,
+				"path": "alphafold/meetings/sdb.md",
+				"status": "ok",
+				"reason": "broad question; 9/20 sources from same document",
+				"lines": 206,
+				"estimated_tokens": 5200,
+				"max_tokens": 25000
+			}]
+		}`),
+	})
+	got := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"agent document promotion: reading whole [source 12] alphafold/meetings/sdb.md",
+		"reason: broad question; 9/20 sources from same document",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("lines = %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, "source text that must not leak") {
+		t.Fatalf("lines = %q, leaked source text", got)
+	}
+}
+
 func TestFormatAgentToolResultSearchIndexShowsNormalizedQuery(t *testing.T) {
 	lines := formatAgentToolResult(falken.ToolResult{
 		Name: "search_index",
@@ -235,5 +269,52 @@ func TestFormatAgentToolResultReadSourceMergeTooLarge(t *testing.T) {
 	}
 	if strings.Contains(got, "expanded text") {
 		t.Fatalf("lines = %q, leaked expanded text", got)
+	}
+}
+
+func TestFormatAgentToolResultReadDocumentSummaryOmitsText(t *testing.T) {
+	lines := formatAgentToolResult(falken.ToolResult{
+		Name: "read_index_document",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "ok",
+			"source_number": 12,
+			"path": "alphafold/meetings/sdb.md",
+			"mode": "whole",
+			"start_line": 1,
+			"end_line": 206,
+			"lines": 206,
+			"estimated_tokens": 5200,
+			"text": "whole document text that must not leak"
+		}`),
+	})
+	got := strings.Join(lines, "\n")
+	if !strings.Contains(got, "agent tool result: read_index_document ok, [source 12] alphafold/meetings/sdb.md:1-206, mode=whole, lines=206, estimated_tokens=5200") {
+		t.Fatalf("lines = %q, want compact read document summary", got)
+	}
+	if strings.Contains(got, "whole document text") {
+		t.Fatalf("lines = %q, leaked document text", got)
+	}
+}
+
+func TestFormatAgentToolResultReadDocumentTooLarge(t *testing.T) {
+	lines := formatAgentToolResult(falken.ToolResult{
+		Name: "read_index_document",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "too_large",
+			"source_number": 12,
+			"path": "big.md",
+			"mode": "whole",
+			"start_line": 1,
+			"end_line": 4200,
+			"lines": 4200,
+			"estimated_tokens": 97000,
+			"max_tokens": 25000
+		}`),
+	})
+	got := strings.Join(lines, "\n")
+	if !strings.Contains(got, "agent tool result: read_index_document too_large, [source 12] big.md:1-4200, lines=4200, estimated_tokens=97000, max_tokens=25000") {
+		t.Fatalf("lines = %q, want too_large summary", got)
 	}
 }

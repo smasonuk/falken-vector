@@ -48,13 +48,20 @@ type SearchToolOptions struct {
 	MaxTopK             int
 	MaxExpansionQueries int
 	MaxRetrievalCalls   int
+
+	DocumentPromotion DocumentPromotionOptions
+	ReadFile          func(string) ([]byte, error)
 }
 
 type searchIndexToolState struct {
-	mu             sync.Mutex
-	calls          int
-	retrievalCalls int
-	opts           SearchToolOptions
+	mu                      sync.Mutex
+	calls                   int
+	retrievalCalls          int
+	documentPromotionReads  int
+	documentPromotionTokens int
+	promotedDocuments       map[string]struct{}
+	documentMatchHits       map[string]int
+	opts                    SearchToolOptions
 }
 
 type searchIndexArgs struct {
@@ -199,6 +206,7 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	}
 
 	sources := make([]searchSourcePayload, 0, len(result.Chunks))
+	registeredSources := make([]rag.SourceChunk, 0, len(result.Chunks))
 	beforeSourceCount := s.opts.Registry.SourceCount()
 	newSources := 0
 	documentIDs := map[string]struct{}{}
@@ -217,6 +225,7 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 			}
 		}
 		seenSourceNumbers[source.SourceNumber] = struct{}{}
+		registeredSources = append(registeredSources, source)
 		if chunk.Chunk.DocumentID != "" {
 			documentIDs[chunk.Chunk.DocumentID] = struct{}{}
 		}
@@ -231,29 +240,153 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 			Text:         source.Text,
 		})
 	}
+	documentMatches := BuildDocumentMatchSummaries(registeredSources, beforeSourceCount, retrieveOpts.TopK)
+	promotionDecisions, promotedContents := s.applyDocumentPromotions(query, documentMatches)
 
 	payload := searchToolPayload{
-		Success:          true,
-		Status:           "ok",
-		Query:            query,
-		OriginalQuery:    payloadOriginalQuery,
-		QueryNormalized:  queryNormalized,
-		Strategy:         strategy,
-		Retrieval:        string(retrieveOpts.Mode),
-		TopK:             retrieveOpts.TopK,
-		QueryPlan:        queryPlanPayload(seedPlan),
-		SeedQueryPlan:    queryPlanPayload(seedPlan),
-		InternalPlans:    internalPlans,
-		ExpansionQueries: expansionQueries,
-		SuggestedQueries: suggestedQueries,
-		NewSources:       newSources,
-		DuplicateSources: len(sources) - newSources,
-		UniqueDocuments:  len(documentIDs),
-		RetrievalCalls:   retrievalCalls,
-		Sources:          sources,
-		Warnings:         warnings,
+		Success:            true,
+		Status:             "ok",
+		Query:              query,
+		OriginalQuery:      payloadOriginalQuery,
+		QueryNormalized:    queryNormalized,
+		Strategy:           strategy,
+		Retrieval:          string(retrieveOpts.Mode),
+		TopK:               retrieveOpts.TopK,
+		QueryPlan:          queryPlanPayload(seedPlan),
+		SeedQueryPlan:      queryPlanPayload(seedPlan),
+		InternalPlans:      internalPlans,
+		ExpansionQueries:   expansionQueries,
+		SuggestedQueries:   suggestedQueries,
+		NewSources:         newSources,
+		DuplicateSources:   len(sources) - newSources,
+		UniqueDocuments:    len(documentIDs),
+		RetrievalCalls:     retrievalCalls,
+		Sources:            sources,
+		DocumentMatches:    documentMatches,
+		DocumentPromotions: promotionDecisions,
+		Warnings:           warnings,
 	}
-	return successfulSearchToolResult(renderSearchToolContent(query, strategy, seedPlan, expansionQueries, suggestedQueries, sources, warnings, payload.NewSources, payload.DuplicateSources), payload), nil
+	return successfulSearchToolResult(renderSearchToolContent(query, strategy, seedPlan, expansionQueries, suggestedQueries, sources, warnings, payload.NewSources, payload.DuplicateSources, documentMatches, promotedContents), payload), nil
+}
+
+func (s *searchIndexToolState) applyDocumentPromotions(query string, matches []DocumentMatchSummary) ([]DocumentPromotionDecision, []string) {
+	opts := normalizeDocumentPromotionOptions(s.opts.DocumentPromotion)
+	if !opts.Enabled {
+		return nil, nil
+	}
+	s.mu.Lock()
+	if s.documentMatchHits == nil {
+		s.documentMatchHits = map[string]int{}
+	}
+	remainingReads := opts.MaxDocumentReads - s.documentPromotionReads
+	remainingTokens := opts.MaxTotalDocumentTokens - s.documentPromotionTokens
+	promotedDocuments := make(map[string]struct{}, len(s.promotedDocuments))
+	for path := range s.promotedDocuments {
+		promotedDocuments[path] = struct{}{}
+	}
+	cumulativeMatches := make([]DocumentMatchSummary, 0, len(matches))
+	for _, match := range matches {
+		match.HitCount += s.documentMatchHits[match.Path]
+		s.documentMatchHits[match.Path] = match.HitCount
+		cumulativeMatches = append(cumulativeMatches, match)
+	}
+	s.mu.Unlock()
+	if remainingReads <= 0 || remainingTokens <= 0 {
+		return documentPromotionBudgetDecisions(matches, remainingReads, remainingTokens), nil
+	}
+	opts.MaxDocumentReads = remainingReads
+	opts.MaxTotalDocumentTokens = remainingTokens
+	matches = unpromotedDocumentMatches(cumulativeMatches, promotedDocuments)
+	promotions := SelectDocumentPromotions(s.opts.UserQuestion, matches, opts)
+	if len(promotions) == 0 {
+		return nil, nil
+	}
+	readOpts := ReadDocumentToolOptions{
+		Registry:  s.opts.Registry,
+		ReadFile:  s.opts.ReadFile,
+		MaxLines:  opts.MaxDocumentReadLines,
+		MaxTokens: opts.MaxDocumentReadTokens,
+	}
+	decisions := make([]DocumentPromotionDecision, 0, len(promotions))
+	contents := make([]string, 0, len(promotions))
+	for _, promotion := range promotions {
+		result := ExecuteReadIndexDocument(readDocumentRequest{
+			SourceNumber: promotion.SourceNumber,
+			Mode:         promotion.Mode,
+			MaxLines:     opts.MaxDocumentReadLines,
+			MaxTokens:    opts.MaxDocumentReadTokens,
+		}, readOpts)
+		decision := DocumentPromotionDecision{
+			SourceNumber: promotion.SourceNumber,
+			Path:         promotion.Path,
+			Status:       result.Status,
+			Reason:       promotion.Reason,
+			MaxLines:     opts.MaxDocumentReadLines,
+			MaxTokens:    opts.MaxDocumentReadTokens,
+		}
+		var payload readDocumentPayload
+		if len(result.Payload) != 0 && json.Unmarshal(result.Payload, &payload) == nil {
+			decision.StartLine = payload.StartLine
+			decision.EndLine = payload.EndLine
+			decision.Lines = payload.Lines
+			decision.EstimatedTokens = payload.EstimatedTokens
+		}
+		if result.Success && result.Status == "ok" {
+			contents = append(contents, result.Content)
+			s.mu.Lock()
+			if s.promotedDocuments == nil {
+				s.promotedDocuments = map[string]struct{}{}
+			}
+			s.promotedDocuments[promotion.Path] = struct{}{}
+			s.documentPromotionReads++
+			s.documentPromotionTokens += decision.EstimatedTokens
+			s.mu.Unlock()
+		}
+		if result.Status == "" && result.Error != "" {
+			decision.Status = "read_document_failed"
+		}
+		if decision.Status == "" {
+			decision.Status = result.Status
+		}
+		if strings.TrimSpace(query) != "" && decision.Reason != "" {
+			decision.Reason = decision.Reason + fmt.Sprintf("; introduced by search query %q", query)
+		}
+		decisions = append(decisions, decision)
+	}
+	return decisions, contents
+}
+
+func documentPromotionBudgetDecisions(matches []DocumentMatchSummary, remainingReads int, remainingTokens int) []DocumentPromotionDecision {
+	if len(matches) == 0 {
+		return nil
+	}
+	reason := "automatic document promotion budget exhausted"
+	if remainingTokens <= 0 {
+		reason = "automatic document promotion token budget exhausted"
+	}
+	decision := DocumentPromotionDecision{
+		Path:   matches[0].Path,
+		Status: "budget_exhausted",
+		Reason: reason,
+	}
+	if len(matches[0].SourceNumbers) != 0 {
+		decision.SourceNumber = matches[0].SourceNumbers[0]
+	}
+	return []DocumentPromotionDecision{decision}
+}
+
+func unpromotedDocumentMatches(matches []DocumentMatchSummary, promoted map[string]struct{}) []DocumentMatchSummary {
+	if len(matches) == 0 || len(promoted) == 0 {
+		return matches
+	}
+	out := make([]DocumentMatchSummary, 0, len(matches))
+	for _, match := range matches {
+		if _, ok := promoted[match.Path]; ok {
+			continue
+		}
+		out = append(out, match)
+	}
+	return out
 }
 
 func (s *searchIndexToolState) reserveRetrievalCall() bool {
@@ -384,6 +517,11 @@ func sourceChunksFromRetrieved(chunks []rag.RetrievedChunk) []rag.SourceChunk {
 			EndLine:      chunk.Chunk.EndLine,
 			Text:         chunk.Chunk.ChunkText,
 			Score:        chunk.Score,
+			Chunker:      chunk.Chunk.Chunker,
+			Language:     chunk.Chunk.Language,
+			HeadingPath:  append([]string(nil), chunk.Chunk.HeadingPath...),
+			SymbolName:   chunk.Chunk.SymbolName,
+			SymbolKind:   chunk.Chunk.SymbolKind,
 		})
 	}
 	return sources
@@ -480,7 +618,7 @@ func queryPlanPayload(plan rag.QueryPlan) searchQueryPlanPayload {
 	}
 }
 
-func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, expansionQueries []string, suggestedQueries []string, sources []searchSourcePayload, warnings []string, newSources int, duplicateSources int) string {
+func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, expansionQueries []string, suggestedQueries []string, sources []searchSourcePayload, warnings []string, newSources int, duplicateSources int, documentMatches []DocumentMatchSummary, promotedContents []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Found %d source chunks for query: %s\n", len(sources), query)
 	if strategy != "" && strategy != "focused" {
@@ -513,6 +651,19 @@ func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, 
 			fmt.Fprintf(&b, "%d. %s\n", i+1, planned)
 		}
 	}
+	if len(documentMatches) != 0 {
+		b.WriteString("\nDocument matches:\n")
+		for _, match := range documentMatches {
+			fmt.Fprintf(&b, "- %s: %d hits", match.Path, match.HitCount)
+			if match.MinStartLine > 0 && match.MaxEndLine > 0 {
+				fmt.Fprintf(&b, ", lines %d-%d", match.MinStartLine, match.MaxEndLine)
+			}
+			if match.FileLineCount > 0 {
+				fmt.Fprintf(&b, ", file %d lines", match.FileLineCount)
+			}
+			b.WriteString("\n")
+		}
+	}
 	for _, source := range sources {
 		fmt.Fprintf(&b, "\n[source %d] %s", source.SourceNumber, source.Path)
 		if source.StartLine > 0 && source.EndLine > 0 {
@@ -520,6 +671,11 @@ func renderSearchToolContent(query string, strategy string, plan rag.QueryPlan, 
 		}
 		b.WriteString("\nText:\n")
 		b.WriteString(source.Text)
+		b.WriteString("\n")
+	}
+	for _, content := range promotedContents {
+		b.WriteString("\n")
+		b.WriteString(content)
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -562,26 +718,28 @@ func marshalSearchToolPayload(payload searchToolPayload) json.RawMessage {
 }
 
 type searchToolPayload struct {
-	Success          bool                     `json:"success"`
-	Status           string                   `json:"status"`
-	Query            string                   `json:"query,omitempty"`
-	OriginalQuery    string                   `json:"original_query,omitempty"`
-	QueryNormalized  bool                     `json:"query_normalized,omitempty"`
-	Strategy         string                   `json:"strategy,omitempty"`
-	Retrieval        string                   `json:"retrieval,omitempty"`
-	TopK             int                      `json:"top_k,omitempty"`
-	QueryPlan        searchQueryPlanPayload   `json:"query_plan,omitempty"`
-	SeedQueryPlan    searchQueryPlanPayload   `json:"seed_query_plan,omitempty"`
-	InternalPlans    []searchQueryPlanPayload `json:"internal_query_plans,omitempty"`
-	ExpansionQueries []string                 `json:"expansion_queries,omitempty"`
-	SuggestedQueries []string                 `json:"suggested_queries,omitempty"`
-	NewSources       int                      `json:"new_sources,omitempty"`
-	DuplicateSources int                      `json:"duplicate_sources,omitempty"`
-	UniqueDocuments  int                      `json:"unique_documents,omitempty"`
-	RetrievalCalls   int                      `json:"retrieval_calls,omitempty"`
-	Sources          []searchSourcePayload    `json:"sources,omitempty"`
-	Warnings         []string                 `json:"warnings"`
-	Error            string                   `json:"error,omitempty"`
+	Success            bool                        `json:"success"`
+	Status             string                      `json:"status"`
+	Query              string                      `json:"query,omitempty"`
+	OriginalQuery      string                      `json:"original_query,omitempty"`
+	QueryNormalized    bool                        `json:"query_normalized,omitempty"`
+	Strategy           string                      `json:"strategy,omitempty"`
+	Retrieval          string                      `json:"retrieval,omitempty"`
+	TopK               int                         `json:"top_k,omitempty"`
+	QueryPlan          searchQueryPlanPayload      `json:"query_plan,omitempty"`
+	SeedQueryPlan      searchQueryPlanPayload      `json:"seed_query_plan,omitempty"`
+	InternalPlans      []searchQueryPlanPayload    `json:"internal_query_plans,omitempty"`
+	ExpansionQueries   []string                    `json:"expansion_queries,omitempty"`
+	SuggestedQueries   []string                    `json:"suggested_queries,omitempty"`
+	NewSources         int                         `json:"new_sources,omitempty"`
+	DuplicateSources   int                         `json:"duplicate_sources,omitempty"`
+	UniqueDocuments    int                         `json:"unique_documents,omitempty"`
+	RetrievalCalls     int                         `json:"retrieval_calls,omitempty"`
+	Sources            []searchSourcePayload       `json:"sources,omitempty"`
+	DocumentMatches    []DocumentMatchSummary      `json:"document_matches,omitempty"`
+	DocumentPromotions []DocumentPromotionDecision `json:"document_promotions,omitempty"`
+	Warnings           []string                    `json:"warnings"`
+	Error              string                      `json:"error,omitempty"`
 }
 
 type searchQueryPlanPayload struct {

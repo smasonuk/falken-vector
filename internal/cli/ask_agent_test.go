@@ -395,6 +395,35 @@ func TestAskAgentMaxMergedReadSourceLinesInvalid(t *testing.T) {
 	}
 }
 
+func TestAskAgentPassesDocumentPromotionControls(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if !opts.DisableDocumentPromotion {
+			t.Fatal("DisableDocumentPromotion = false, want true from --no-agent-document-promotion")
+		}
+		if opts.MaxDocumentReadLines != 123 || opts.MaxDocumentReadTokens != 456 || opts.MaxDocumentReads != 1 {
+			t.Fatalf("document caps = lines %d tokens %d reads %d, want 123/456/1", opts.MaxDocumentReadLines, opts.MaxDocumentReadTokens, opts.MaxDocumentReads)
+		}
+		return agentask.Result{Answer: "ok"}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{
+		"--state-dir", state,
+		"ask", "hello",
+		"--agent",
+		"--retrieval", "lexical",
+		"--no-agent-document-promotion",
+		"--max-agent-document-lines", "123",
+		"--max-agent-document-tokens", "456",
+		"--max-agent-document-reads", "1",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
 func TestReadSourceOverlapPolicyFromFlag(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -916,6 +945,46 @@ func TestAskAgentSourceAuditPrintsReadSourceCallsWithoutOverlapDecisions(t *test
 	} {
 		if strings.Contains(output, bad) {
 			t.Fatalf("output = %q, did not want %q", output, bad)
+		}
+	}
+}
+
+func TestAskAgentSourceAuditPrintsDocumentReadMetrics(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 1].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "meeting.md", StartLine: 1, EndLine: 206},
+				{SourceNumber: 2, Path: "meeting.md", StartLine: 20, EndLine: 25},
+			},
+			DocumentReadCalls:                1,
+			DocumentReadWholeCalls:           1,
+			DocumentPromotionAutoReads:       1,
+			DocumentPromotionSkippedTooLarge: 1,
+			DocumentPromotionPolicy:          "auto",
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"- document read calls: 1",
+		"- document read whole calls: 1",
+		"- document promotion auto reads: 1",
+		"- document promotion skipped too large: 1",
+		"- document promotion policy: auto",
+		"[source 2] meeting.md:20-25  (covered by cited source 1)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
 		}
 	}
 }

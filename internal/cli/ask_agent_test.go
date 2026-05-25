@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -327,14 +329,61 @@ func TestAskAgentPassesCoverageAndReadSourceFlags(t *testing.T) {
 		if !opts.EnableReadSourceTool {
 			t.Fatal("EnableReadSourceTool = false, want true")
 		}
+		if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapMerge {
+			t.Fatalf("ReadSourceOverlapPolicy = %q, want merge", opts.ReadSourceOverlapPolicy)
+		}
 		return agentask.Result{Answer: "agent answer"}
 	})
 	defer restore()
 
 	cmd := NewRootCommand()
-	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-coverage-nudge", "--min-agent-searches", "3", "--max-agent-coverage-retries", "2", "--agent-read-source-tool"})
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--agent-coverage-nudge", "--min-agent-searches", "3", "--max-agent-coverage-retries", "2", "--agent-read-source-tool", "--read-source-overlap-policy", "merge"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestAskAgentReadSourceOverlapPolicyInvalid(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		t.Fatal("runAgentAsk should not be called when overlap policy is invalid")
+		return agentask.Result{}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--read-source-overlap-policy", "bogus"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--read-source-overlap-policy must be skip, merge, or allow") {
+		t.Fatalf("Execute error = %v, want overlap policy validation", err)
+	}
+}
+
+func TestReadSourceOverlapPolicyFromFlag(t *testing.T) {
+	tests := []struct {
+		value   string
+		want    agentask.ReadSourceOverlapPolicy
+		wantErr bool
+	}{
+		{value: "", want: agentask.ReadSourceOverlapSkip},
+		{value: "skip", want: agentask.ReadSourceOverlapSkip},
+		{value: "merge", want: agentask.ReadSourceOverlapMerge},
+		{value: "allow", want: agentask.ReadSourceOverlapAllow},
+		{value: "bogus", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			got, err := readSourceOverlapPolicyFromFlag(tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("readSourceOverlapPolicyFromFlag succeeded, want error")
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("readSourceOverlapPolicyFromFlag = %q, %v; want %q, nil", got, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -593,6 +642,9 @@ func TestAskAgentSourcesBothPrintsCitedAndAllSources(t *testing.T) {
 	if strings.Contains(output, "[source 2] cited.go:3-4  (cited)") {
 		t.Fatalf("output = %q, want cited source only in cited section for both mode", output)
 	}
+	if strings.Contains(output, "search tool calls:") || strings.Contains(output, "retrieval calls:") {
+		t.Fatalf("output = %q, want unavailable audit metrics omitted", output)
+	}
 }
 
 func TestAskAgentSourcesBothMarksOtherSourcesCoveredByCitedExpansion(t *testing.T) {
@@ -665,6 +717,49 @@ func TestAskAgentSourcesAllPrintsRetrievedSources(t *testing.T) {
 	}
 	if strings.Contains(output, "Sources cited:") {
 		t.Fatalf("output = %q, did not want cited section for --sources all", output)
+	}
+}
+
+func TestAskAgentSourceAuditPrintsSearchAndRetrievalTotals(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer: "agent answer [source 2] [source 3] [source 4] [source 5].",
+			Sources: []rag.SourceChunk{
+				{SourceNumber: 1, Path: "one.go", StartLine: 1, EndLine: 2, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold"}},
+				{SourceNumber: 2, Path: "two.go", StartLine: 1, EndLine: 2, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold"}},
+				{SourceNumber: 3, Path: "three.go", StartLine: 1, EndLine: 2, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold"}},
+				{SourceNumber: 4, Path: "four.go", StartLine: 1, EndLine: 2, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "protein folding"}},
+				{SourceNumber: 5, Path: "five.go", StartLine: 1, EndLine: 2, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "protein folding"}},
+			},
+			SearchToolCalls: 2,
+			RetrievalCalls:  5,
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "all", "--show-agent-tools"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"Source audit:",
+		"- available to agent: 5",
+		"- cited in answer: 4",
+		"- uncited: 1",
+		"- search tool calls: 2",
+		"- retrieval calls: 5",
+		"- introduced by query:",
+		"  - AlphaFold: 3",
+		"  - protein folding: 2",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
 	}
 }
 
@@ -812,9 +907,9 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 		return agentask.Result{
 			Answer: "AlphaFold outputs include A3M, PDB, JSON, NCBI, UniProt metadata, and folding workflow notes [source 11].",
 			Sources: []rag.SourceChunk{
-				{SourceNumber: 10, Path: "alphafold/meetings/sdb.md", StartLine: 21, EndLine: 26},
-				{SourceNumber: 11, Path: "alphafold/meetings/sdb.md", StartLine: 1, EndLine: 33},
-				{SourceNumber: 12, Path: "science_cloud/info/apis.md", StartLine: 103, EndLine: 103},
+				{SourceNumber: 10, Path: "alphafold/meetings/sdb.md", StartLine: 21, EndLine: 26, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold", Strategy: "broad", Rank: 1}},
+				{SourceNumber: 11, Path: "alphafold/meetings/sdb.md", StartLine: 1, EndLine: 33, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold", Strategy: "broad", Rank: 2}},
+				{SourceNumber: 12, Path: "science_cloud/info/apis.md", StartLine: 103, EndLine: 103, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "protein folding", Strategy: "broad", Rank: 3}},
 			},
 			ThinSourceNudged: true,
 			ThinSourceWarnings: []string{
@@ -838,6 +933,7 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 	for _, want := range []string{
 		"agent broad expansion queries:",
 		"  1. AlphaFold A3M PDB JSON NCBI",
+		"top_k=12",
 		"agent thin-source nudge: expanding [source 11]",
 		"agent tool call: read_index_source",
 	} {
@@ -845,7 +941,7 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 			t.Fatalf("stderr = %q, want %q", stderr, want)
 		}
 	}
-	for _, bad := range []string{"these two folders here", "going to it probably", "DVI 000 150"} {
+	for _, bad := range []string{"these two folders here", "going to it probably", "DVI 000 150", "got any metadata what was used run", "[sources"} {
 		if strings.Contains(stderr, bad) || strings.Contains(output, bad) {
 			t.Fatalf("stderr = %q output = %q, leaked noisy fragment %q", stderr, output, bad)
 		}
@@ -856,6 +952,8 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 		"Other sources available to the agent:",
 		"[source 10] alphafold/meetings/sdb.md:21-26  (covered by cited source 11)",
 		"Source audit:",
+		"- introduced by query:",
+		"  - AlphaFold: 2",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output = %q, want %q", output, want)
@@ -863,6 +961,117 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 	}
 	if strings.Contains(output, "Other sources available to the agent:\n[source 11]") {
 		t.Fatalf("output = %q, cited source repeated in other section", output)
+	}
+}
+
+func TestAskAgentNormalizesGroupedCitationsForSourcesAndAudit(t *testing.T) {
+	cases := []struct {
+		name     string
+		answer   string
+		wantRefs []string
+	}{
+		{name: "plural comma", answer: "The artifacts are FASTA and PDB [sources 2, 3].", wantRefs: []string{"[source 2]", "[source 3]"}},
+		{name: "singular comma", answer: "The artifacts are FASTA and PDB [source 2, 3].", wantRefs: []string{"[source 2]", "[source 3]"}},
+		{name: "and", answer: "The artifacts are FASTA and PDB [source 2 and 3].", wantRefs: []string{"[source 2]", "[source 3]"}},
+		{name: "mixed", answer: "The pipeline is described here [source 13; sources 4, 19].", wantRefs: []string{"[source 13]", "[source 4]", "[source 19]"}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			state, _ := setupEvalCLITest(t)
+			restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+				return agentask.Result{
+					Answer:  tt.answer,
+					Sources: numberedTestSources(20),
+				}
+			})
+			defer restore()
+
+			cmd := NewRootCommand()
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			output := out.String()
+			if strings.Contains(output, "[sources") || strings.Contains(output, "[source 2, 3]") || strings.Contains(output, "[source 2 and 3]") {
+				t.Fatalf("output = %q, grouped citation was not normalized", output)
+			}
+			for _, want := range tt.wantRefs {
+				if !strings.Contains(output, want) {
+					t.Fatalf("output = %q, want normalized ref %q", output, want)
+				}
+			}
+			if !strings.Contains(output, "Sources cited:") || !strings.Contains(output, "Other sources available to the agent:") || !strings.Contains(output, "Source audit:") {
+				t.Fatalf("output = %q, want cited/other/audit sections", output)
+			}
+			if !strings.Contains(output, "- available to agent: 20") {
+				t.Fatalf("output = %q, want available count", output)
+			}
+			if !strings.Contains(output, fmt.Sprintf("- cited in answer: %d", len(tt.wantRefs))) ||
+				!strings.Contains(output, fmt.Sprintf("- uncited: %d", 20-len(tt.wantRefs))) {
+				t.Fatalf("output = %q, want normalized citation audit counts", output)
+			}
+			other := output[strings.Index(output, "Other sources available to the agent:"):]
+			for _, ref := range tt.wantRefs {
+				number := strings.TrimSuffix(strings.TrimPrefix(ref, "[source "), "]")
+				sourceNumber, err := strconv.Atoi(number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(other, fmt.Sprintf("[source %d] source-%02d.md", sourceNumber, sourceNumber)) {
+					t.Fatalf("output = %q, cited source %s appeared in other section", output, number)
+				}
+			}
+		})
+	}
+}
+
+func TestAskAgentGroupedCitationNormalizationDebugNote(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer:  "The artifacts are FASTA and PDB [sources 2, 3].",
+			Sources: numberedTestSources(3),
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both", "--show-agent-tools"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "agent citation note: normalized [sources 2, 3] -> [source 2] [source 3]") {
+		t.Fatalf("stderr = %q, want citation normalization note", errOut.String())
+	}
+}
+
+func TestAskAgentGroupedCitationNormalizationHiddenWithoutDebug(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(agentask.Options) agentask.Result {
+		return agentask.Result{
+			Answer:  "The artifacts are FASTA and PDB [sources 2, 3].",
+			Sources: numberedTestSources(3),
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--sources", "both"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.Contains(errOut.String(), "normalized [sources") {
+		t.Fatalf("stderr = %q, want no citation normalization note without debug", errOut.String())
 	}
 }
 
@@ -1035,6 +1244,19 @@ func stubAgentAskCLI(t *testing.T, run func(agentask.Options) agentask.Result) f
 		newCLIAgentLLMWithModel = oldNewAgentLLMWithModel
 		runAgentAsk = oldRunAgentAsk
 	}
+}
+
+func numberedTestSources(count int) []rag.SourceChunk {
+	sources := make([]rag.SourceChunk, 0, count)
+	for i := 1; i <= count; i++ {
+		sources = append(sources, rag.SourceChunk{
+			SourceNumber: i,
+			Path:         fmt.Sprintf("source-%02d.md", i),
+			StartLine:    i,
+			EndLine:      i,
+		})
+	}
+	return sources
 }
 
 func setupAgentManifestOnly(t *testing.T) string {

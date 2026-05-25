@@ -326,6 +326,11 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		emitter.emitError(EventRunFailed, err)
 		return Answer{}, err
 	}
+	readSourceOverlapPolicy, err := readSourceOverlapPolicyOption(request.ReadSourceOverlapPolicy)
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return Answer{}, err
+	}
 	result, err := agentask.Run(ctx, agentask.Options{
 		Question:                 request.Question,
 		Paths:                    e.paths,
@@ -345,6 +350,7 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		MinBroadSearchCalls:      request.MinAgentSearches,
 		MaxCoverageRetries:       request.MaxCoverageRetries,
 		EnableReadSourceTool:     readSourceTool,
+		ReadSourceOverlapPolicy:  readSourceOverlapPolicy,
 		Events: func(event falken.Event) {
 			converted := convertFalkenEvent(event)
 			if converted.Type == EventRunCompleted || converted.Type == EventRunFailed {
@@ -753,6 +759,19 @@ func readSourceToolOption(policy ReadSourcePolicy, legacyEnabled bool, question 
 	}
 }
 
+func readSourceOverlapPolicyOption(policy ReadSourceOverlapPolicy) (agentask.ReadSourceOverlapPolicy, error) {
+	switch policy {
+	case ReadSourceOverlapDefault, ReadSourceOverlapSkip:
+		return agentask.ReadSourceOverlapSkip, nil
+	case ReadSourceOverlapMerge:
+		return agentask.ReadSourceOverlapMerge, nil
+	case ReadSourceOverlapAllow:
+		return agentask.ReadSourceOverlapAllow, nil
+	default:
+		return "", fmt.Errorf("invalid read source overlap policy %q", policy)
+	}
+}
+
 func publicRetrievedChunks(chunks []rag.RetrievedChunk, config ObservabilityConfig, rawText bool) []RetrievedChunk {
 	out := make([]RetrievedChunk, 0, len(chunks))
 	for i, chunk := range chunks {
@@ -804,10 +823,11 @@ func retrievalEvent(opts rag.RetrieveOptions, result *rag.RetrieveResult, config
 }
 
 func answerFromRAG(result rag.AskResult) Answer {
+	answer, _ := rag.NormalizeGroupedCitations(result.Answer)
 	available := publicSources(result.Sources)
-	cited := publicSources(citedSourceChunks(result.Answer, result.Sources))
+	cited := publicSources(citedSourceChunks(answer, result.Sources))
 	return Answer{
-		Text:             result.Answer,
+		Text:             answer,
 		Sources:          available,
 		CitedSources:     cited,
 		AvailableSources: available,
@@ -822,10 +842,11 @@ func answerFromAgent(result agentask.Result) Answer {
 	for _, name := range result.ToolCalls {
 		calls = append(calls, ToolCallSummary{Name: name})
 	}
+	answer, _ := rag.NormalizeGroupedCitations(result.Answer)
 	available := publicSources(result.Sources)
-	cited := publicSources(citedSourceChunks(result.Answer, result.Sources))
+	cited := publicSources(citedSourceChunks(answer, result.Sources))
 	return Answer{
-		Text:               result.Answer,
+		Text:               answer,
 		Sources:            available,
 		CitedSources:       cited,
 		AvailableSources:   available,
@@ -836,6 +857,8 @@ func answerFromAgent(result agentask.Result) Answer {
 		ThinSourceWarnings: append([]string(nil), result.ThinSourceWarnings...),
 		ThinSourceNudged:   result.ThinSourceNudged,
 		Retried:            result.Retried,
+		SearchToolCalls:    result.SearchToolCalls,
+		RetrievalCalls:     result.RetrievalCalls,
 		ToolCalls:          calls,
 	}
 }

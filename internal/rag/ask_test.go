@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -77,6 +78,81 @@ func TestValidateAnswerCitationsIgnoresDuplicateCitations(t *testing.T) {
 	validation := ValidateAnswerCitations("Answer [source 1] again [source 1].", 1)
 	if !validation.Valid || len(validation.CitedSources) != 1 {
 		t.Fatalf("validation = %+v, want duplicate citations accepted once", validation)
+	}
+}
+
+func TestValidateAnswerCitationsDetectsMalformedGroupedCitations(t *testing.T) {
+	tests := []string{
+		"The files are kept in folders [sources 2, 3].",
+		"The files are kept in folders [source 2, 3].",
+		"The files are kept in folders [source 13; sources 4, 19].",
+		"The files are kept in folders [source 2 and 3].",
+		"The files are kept in folders [source 2 / source 3].",
+		"The files are kept in folders [source two].",
+		"The files are kept in folders [source A].",
+		"The files are kept in folders [sources 1-3].",
+	}
+	for _, answer := range tests {
+		t.Run(answer, func(t *testing.T) {
+			validation := ValidateAnswerCitations(answer, 20)
+			if validation.Valid || len(validation.MalformedCitations) != 1 {
+				t.Fatalf("validation = %+v, want malformed citation", validation)
+			}
+			if !strings.Contains(strings.Join(validation.Warnings, "\n"), "one bracket per source") {
+				t.Fatalf("warnings = %+v, want bracket guidance", validation.Warnings)
+			}
+		})
+	}
+}
+
+func TestValidateAnswerCitationsAcceptsSeparateCitations(t *testing.T) {
+	validation := ValidateAnswerCitations("The files are kept in folders [source 2] [source 3].", 3)
+	if !validation.Valid || len(validation.MalformedCitations) != 0 {
+		t.Fatalf("validation = %+v, want separate citations valid", validation)
+	}
+}
+
+func TestNormalizeGroupedCitations(t *testing.T) {
+	tests := []struct {
+		name      string
+		answer    string
+		want      string
+		wantCited []int
+	}{
+		{name: "plural comma", answer: "Artifacts [sources 2, 3].", want: "Artifacts [source 2] [source 3].", wantCited: []int{2, 3}},
+		{name: "singular comma", answer: "Artifacts [source 2, 3].", want: "Artifacts [source 2] [source 3].", wantCited: []int{2, 3}},
+		{name: "and", answer: "Artifacts [source 2 and 3].", want: "Artifacts [source 2] [source 3].", wantCited: []int{2, 3}},
+		{name: "mixed semicolon", answer: "Pipeline [source 13; sources 4, 19].", want: "Pipeline [source 13] [source 4] [source 19].", wantCited: []int{4, 13, 19}},
+		{name: "already canonical", answer: "Artifacts [source 2] [source 3].", want: "Artifacts [source 2] [source 3].", wantCited: []int{2, 3}},
+		{name: "ambiguous text", answer: "Artifacts [source two].", want: "Artifacts [source two]."},
+		{name: "range unsupported", answer: "Artifacts [source 1-3].", want: "Artifacts [source 1-3]."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, warnings := NormalizeGroupedCitations(tt.answer)
+			if got != tt.want {
+				t.Fatalf("NormalizeGroupedCitations = %q, want %q", got, tt.want)
+			}
+			if tt.wantCited != nil {
+				if cited := ExtractCitedSourceNumbers(got); !reflect.DeepEqual(cited, tt.wantCited) {
+					t.Fatalf("cited = %+v, want %+v", cited, tt.wantCited)
+				}
+			}
+			if tt.answer != tt.want && len(warnings) == 0 {
+				t.Fatalf("warnings empty, want rewrite note")
+			}
+			if tt.answer == tt.want && len(warnings) != 0 {
+				t.Fatalf("warnings = %+v, want none", warnings)
+			}
+		})
+	}
+}
+
+func TestNormalizeGroupedCitationsKeepsOutOfRangeVisible(t *testing.T) {
+	normalized, _ := NormalizeGroupedCitations("Bad [sources 2, 999].")
+	validation := ValidateAnswerCitations(normalized, 3)
+	if validation.Valid || len(validation.OutOfRangeSources) != 1 || validation.OutOfRangeSources[0] != 999 {
+		t.Fatalf("validation = %+v, want out-of-range source after normalization", validation)
 	}
 }
 

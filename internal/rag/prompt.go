@@ -12,6 +12,8 @@ Rules:
 - Use only the context below.
 - If the answer is not in the context, say you do not know.
 - Cite sources using [source N].
+- Use one bracket per cited source: [source 2] [source 3].
+- Never write [sources 2, 3], [source 2, 3], [source 2 and 3], or multiple source numbers inside one bracket.
 - Be concise.`
 
 const StrictCitationSystemPrompt = SystemPrompt + `
@@ -19,6 +21,8 @@ const StrictCitationSystemPrompt = SystemPrompt + `
 Your previous answer did not correctly cite the provided sources.
 Rewrite the answer using only the supplied context.
 Every factual claim must include a citation like [source N].
+Use one bracket per cited source: [source 2] [source 3].
+Never write [sources 2, 3], [source 2, 3], [source 2 and 3], or multiple source numbers inside one bracket.
 Only cite source numbers that exist in the context.
 If the answer is not supported by the context, say you do not know and cite the closest relevant source if applicable.`
 

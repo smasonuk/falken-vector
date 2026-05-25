@@ -146,11 +146,13 @@ func formatAgentToolResult(result falken.ToolResult) []string {
 
 func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 	var payload struct {
-		Success   bool   `json:"success"`
-		Status    string `json:"status"`
-		Query     string `json:"query"`
-		TopK      int    `json:"top_k"`
-		QueryPlan struct {
+		Success         bool   `json:"success"`
+		Status          string `json:"status"`
+		Query           string `json:"query"`
+		OriginalQuery   string `json:"original_query"`
+		QueryNormalized bool   `json:"query_normalized"`
+		TopK            int    `json:"top_k"`
+		QueryPlan       struct {
 			Mode    string   `json:"mode"`
 			Queries []string `json:"queries"`
 		} `json:"query_plan"`
@@ -176,6 +178,9 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 		status, _ = agentToolResultStatus(result)
 	}
 	summary := fmt.Sprintf("agent tool result: %s %s, query=%s, top_k=%d, sources=%d", result.Name, status, strconv.Quote(payload.Query), payload.TopK, len(payload.Sources))
+	if payload.QueryNormalized && payload.OriginalQuery != "" {
+		summary = fmt.Sprintf("agent tool result: %s %s, query=%s (normalized from %s), top_k=%d, sources=%d", result.Name, status, strconv.Quote(payload.Query), strconv.Quote(payload.OriginalQuery), payload.TopK, len(payload.Sources))
+	}
 	if payload.RetrievalCalls > 0 {
 		summary += fmt.Sprintf(", new=%d, duplicates=%d, docs=%d, retrievals=%d", payload.NewSources, payload.DuplicateSources, payload.UniqueDocuments, payload.RetrievalCalls)
 	}
@@ -217,14 +222,18 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 
 func formatAgentReadSourceToolResult(result falken.ToolResult) ([]string, bool) {
 	var payload struct {
-		Success      bool     `json:"success"`
-		Status       string   `json:"status"`
-		SourceNumber int      `json:"source_number"`
-		Path         string   `json:"path"`
-		StartLine    int      `json:"start_line"`
-		EndLine      int      `json:"end_line"`
-		Warnings     []string `json:"warnings"`
-		Error        string   `json:"error"`
+		Success               bool     `json:"success"`
+		Status                string   `json:"status"`
+		SourceNumber          int      `json:"source_number"`
+		CoveredBySourceNumber int      `json:"covered_by_source_number"`
+		Path                  string   `json:"path"`
+		StartLine             int      `json:"start_line"`
+		EndLine               int      `json:"end_line"`
+		CoveredByPath         string   `json:"covered_by_path"`
+		CoveredByStartLine    int      `json:"covered_by_start_line"`
+		CoveredByEndLine      int      `json:"covered_by_end_line"`
+		Warnings              []string `json:"warnings"`
+		Error                 string   `json:"error"`
 	}
 	if len(result.Payload) == 0 || json.Unmarshal(result.Payload, &payload) != nil {
 		return nil, false
@@ -239,7 +248,26 @@ func formatAgentReadSourceToolResult(result falken.ToolResult) ([]string, bool) 
 		StartLine:    payload.StartLine,
 		EndLine:      payload.EndLine,
 	}
-	out := []string{fmt.Sprintf("agent tool result: %s %s, %s", result.Name, status, SourceReference(source))}
+	summary := fmt.Sprintf("agent tool result: %s %s, %s", result.Name, status, SourceReference(source))
+	if status == "already_covered" && payload.CoveredBySourceNumber > 0 {
+		covered := rag.SourceChunk{
+			SourceNumber: payload.CoveredBySourceNumber,
+			Path:         payload.CoveredByPath,
+			StartLine:    payload.CoveredByStartLine,
+			EndLine:      payload.CoveredByEndLine,
+		}
+		summary = fmt.Sprintf("agent tool result: %s ok, [source %d] already covered by %s", result.Name, payload.SourceNumber, SourceReference(covered))
+	}
+	if status == "merge_existing" && payload.CoveredBySourceNumber > 0 {
+		covered := rag.SourceChunk{
+			SourceNumber: payload.CoveredBySourceNumber,
+			Path:         payload.CoveredByPath,
+			StartLine:    payload.CoveredByStartLine,
+			EndLine:      payload.CoveredByEndLine,
+		}
+		summary = fmt.Sprintf("agent tool result: %s ok, merged [source %d] into expanded %s", result.Name, payload.SourceNumber, SourceReference(covered))
+	}
+	out := []string{summary}
 	for _, warning := range payload.Warnings {
 		out = append(out, fmt.Sprintf("agent tool warning: %s: %s", result.Name, warning))
 	}

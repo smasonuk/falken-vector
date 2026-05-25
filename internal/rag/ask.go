@@ -41,13 +41,14 @@ func Ask(ctx context.Context, opts AskOptions) (AskResult, error) {
 	if err != nil {
 		return AskResult{Sources: prompt.Sources}, err
 	}
-	result := AskResult{Answer: response.Text, Sources: prompt.Sources}
+	answer, _ := NormalizeGroupedCitations(response.Text)
+	result := AskResult{Answer: answer, Sources: prompt.Sources}
 	policy := normalizeCitationPolicy(opts.CitationPolicy)
 	if policy == CitationPolicyOff {
 		result.CitationValid = true
 		return result, nil
 	}
-	validation := ValidateAnswerCitations(response.Text, len(prompt.Sources))
+	validation := ValidateAnswerCitations(result.Answer, len(prompt.Sources))
 	if validation.Valid {
 		result.CitationValid = true
 		return result, nil
@@ -67,9 +68,9 @@ func Ask(ctx context.Context, opts AskOptions) (AskResult, error) {
 		return result, nil
 	}
 	result.Retried = true
-	result.Answer = retryResponse.Text
+	result.Answer, _ = NormalizeGroupedCitations(retryResponse.Text)
 	result.CitationWarnings = append(result.CitationWarnings, "retried with stricter citation prompt")
-	retryValidation := ValidateAnswerCitations(retryResponse.Text, len(prompt.Sources))
+	retryValidation := ValidateAnswerCitations(result.Answer, len(prompt.Sources))
 	result.CitationValid = retryValidation.Valid
 	if !retryValidation.Valid {
 		result.CitationWarnings = append(result.CitationWarnings, "final answer may have citation issues: "+joinCitationWarnings(retryValidation.Warnings))

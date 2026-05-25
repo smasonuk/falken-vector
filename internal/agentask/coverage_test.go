@@ -39,6 +39,9 @@ func TestCoverageNudgePromptContainsInstructions(t *testing.T) {
 		"additional search_index",
 		"materially different queries",
 		"terms, acronyms, paths, filenames, headings, entities, and concepts visible in the sources already returned",
+		"[source 2] [source 3]",
+		"Never write [sources 2, 3]",
+		"one bracket per cited source",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want substring %q", prompt, want)

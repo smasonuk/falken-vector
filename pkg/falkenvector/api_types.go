@@ -121,6 +121,15 @@ const (
 	ReadSourcePolicyOff     ReadSourcePolicy = "off"
 )
 
+type ReadSourceOverlapPolicy string
+
+const (
+	ReadSourceOverlapDefault ReadSourceOverlapPolicy = ""
+	ReadSourceOverlapSkip    ReadSourceOverlapPolicy = "skip"
+	ReadSourceOverlapMerge   ReadSourceOverlapPolicy = "merge"
+	ReadSourceOverlapAllow   ReadSourceOverlapPolicy = "allow"
+)
+
 // AskRequest asks the engine to answer a question.
 //
 // Retrieval overrides engine defaults for this call. Agent enables the tool
@@ -131,6 +140,8 @@ const (
 // ReadSourcePolicy controls read_index_source in agent mode. Default/auto enables
 // it for broad questions. ReadSourceTool is preserved for compatibility and acts
 // like ReadSourcePolicyOn unless ReadSourcePolicyOff is set.
+// ReadSourceOverlapPolicy controls whether overlapping read_index_source calls
+// are skipped, merged into an existing expanded source, or always allowed.
 type AskRequest struct {
 	Question string
 
@@ -153,8 +164,9 @@ type AskRequest struct {
 	MinAgentSearches   int
 	MaxCoverageRetries int
 
-	ReadSourceTool   bool
-	ReadSourcePolicy ReadSourcePolicy
+	ReadSourceTool          bool
+	ReadSourcePolicy        ReadSourcePolicy
+	ReadSourceOverlapPolicy ReadSourceOverlapPolicy
 }
 
 // Answer is the structured answer returned by Ask.
@@ -175,6 +187,8 @@ type Answer struct {
 	ThinSourceWarnings []string
 	ThinSourceNudged   bool
 	Retried            bool
+	SearchToolCalls    int
+	RetrievalCalls     int
 
 	ToolCalls []ToolCallSummary
 }

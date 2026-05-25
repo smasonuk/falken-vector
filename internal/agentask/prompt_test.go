@@ -12,7 +12,25 @@ func TestAgentSystemPromptDirectsBroadQuestionsToSearchMore(t *testing.T) {
 		"at least two materially different queries",
 		"suggested follow-up queries",
 		"mostly duplicates or no new evidence",
+		"fewer than 3 new sources",
+		"already searched twice",
 		"Do not invent source IDs",
+		"[source 2] [source 3]",
+		"Never write [sources 2, 3]",
+		"one bracket per cited source",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want substring %q", prompt, want)
+		}
+	}
+}
+
+func TestCorrectiveCitationPromptForbidsGroupedCitations(t *testing.T) {
+	prompt := correctiveCitationPrompt([]string{"bad citation"}, "Previous [sources 2, 3].")
+	for _, want := range []string{
+		"[source 2] [source 3]",
+		"Never write [sources 2, 3]",
+		"one bracket per cited source",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want substring %q", prompt, want)
@@ -27,6 +45,8 @@ func TestReadSourcePromptIncludesBroadSummaryThinSpanGuidance(t *testing.T) {
 		"For broad summaries",
 		"one or two lines",
 		"several relevant sources come from the same document",
+		"read one representative source",
+		"expanded line ranges would largely overlap",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want substring %q", prompt, want)

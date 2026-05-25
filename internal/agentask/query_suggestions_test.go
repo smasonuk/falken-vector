@@ -179,6 +179,95 @@ func TestSelectExpansionQueriesPrefersDiverseCleanGroups(t *testing.T) {
 	}
 }
 
+func TestUsefulExpansionQueryRejectsWeakSingleSemanticTerm(t *testing.T) {
+	rejected := []struct {
+		query    string
+		question string
+	}{
+		{query: "AlphaFold structure", question: "AlphaFold"},
+		{query: "protein folding species", question: "protein folding"},
+	}
+	for _, tt := range rejected {
+		if usefulExpansionQuery(tt.query, tt.question) {
+			t.Fatalf("usefulExpansionQuery(%q, %q) = true, want weak query rejected", tt.query, tt.question)
+		}
+	}
+	accepted := []struct {
+		query    string
+		question string
+	}{
+		{query: "AlphaFold structure DB", question: "AlphaFold"},
+		{query: "protein folding species NCBI", question: "protein folding"},
+		{query: "protein folding PDB JSON", question: "protein folding"},
+		{query: "AlphaFold A3M PDB JSON NCBI", question: "AlphaFold"},
+	}
+	for _, tt := range accepted {
+		if !usefulExpansionQuery(tt.query, tt.question) {
+			t.Fatalf("usefulExpansionQuery(%q, %q) = false, want accepted", tt.query, tt.question)
+		}
+	}
+}
+
+func TestSuggestFollowupQueriesRejectsWeakBroadExpansionFillers(t *testing.T) {
+	tests := []struct {
+		name           string
+		question       string
+		sourceText     string
+		rejectContains []string
+		wantContains   []string
+	}{
+		{
+			name:           "rejects weak structure only",
+			question:       "AlphaFold",
+			sourceText:     "The meeting mentioned AlphaFold structure and folding.",
+			rejectContains: []string{"AlphaFold structure"},
+		},
+		{
+			name:         "accepts structure DB",
+			question:     "AlphaFold",
+			sourceText:   "The meeting mentioned AlphaFold structure DB metadata.",
+			wantContains: []string{"structure DB"},
+		},
+		{
+			name:           "rejects weak species only",
+			question:       "protein folding",
+			sourceText:     "The meeting mentioned protein folding species folders.",
+			rejectContains: []string{"protein folding species"},
+		},
+		{
+			name:         "accepts species NCBI",
+			question:     "protein folding",
+			sourceText:   "The meeting mentioned protein folding species folders and NCBI tax IDs.",
+			wantContains: []string{"species", "NCBI"},
+		},
+		{
+			name:         "accepts artifact query",
+			question:     "AlphaFold",
+			sourceText:   "Outputs include A3M, PDB, JSON, and FASTA.",
+			wantContains: []string{"A3M", "PDB", "JSON"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queries := SuggestFollowupQueries(tt.question, []rag.SourceChunk{{
+				Path: "alphafold/meetings/sdb.md",
+				Text: tt.sourceText,
+			}}, 3)
+			got := strings.Join(queries, "\n")
+			for _, reject := range tt.rejectContains {
+				if strings.Contains(got, reject) {
+					t.Fatalf("queries = %+v, rejected weak query containing %q", queries, reject)
+				}
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Fatalf("queries = %+v, want %q", queries, want)
+				}
+			}
+		})
+	}
+}
+
 func TestUsefulExpansionQueryQualityGate(t *testing.T) {
 	accepted := []string{
 		"AlphaFold A3M PDB JSON",

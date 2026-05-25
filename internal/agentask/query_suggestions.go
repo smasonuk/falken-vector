@@ -47,9 +47,16 @@ func suggestFollowupQueries(question string, sources []rag.SourceChunk, limit in
 	}
 	topic := compactQueryTopic(question)
 	if purpose == SuggestionPurposeBroadExpansion {
-		candidates := make([]expansionQueryCandidate, 0, len(groups))
+		cleanedGroups := make([][]string, 0, len(groups))
 		for _, group := range groups {
-			group = cleanBroadExpansionGroup(group)
+			if cleaned := cleanBroadExpansionGroup(group); len(cleaned) != 0 {
+				cleanedGroups = append(cleanedGroups, cleaned)
+			}
+		}
+		availableTerms := flattenTermGroups(cleanedGroups)
+		candidates := make([]expansionQueryCandidate, 0, len(groups))
+		for _, group := range cleanedGroups {
+			group = enrichExpansionGroup(group, availableTerms)
 			query := normalizeSearchQuery(joinUnique(append([]string{topic}, group...)))
 			if query == "" || !materiallyDifferentQuery(query, question) {
 				continue
@@ -83,6 +90,14 @@ func suggestFollowupQueries(question string, sources []rag.SourceChunk, limit in
 		}
 	}
 	return queries
+}
+
+func flattenTermGroups(groups [][]string) []string {
+	out := make([]string, 0)
+	for _, group := range groups {
+		out = append(out, group...)
+	}
+	return uniqueTerms(out)
 }
 
 type expansionQueryCandidate struct {
@@ -322,6 +337,10 @@ func cleanBroadExpansionGroup(group []string) []string {
 		if term == "" {
 			continue
 		}
+		if usefulExpansionTerm(term) {
+			out = append(out, term)
+			continue
+		}
 		words := strings.Fields(term)
 		if len(words) > 1 {
 			cleanedWords := make([]string, 0, len(words))
@@ -335,11 +354,36 @@ func cleanBroadExpansionGroup(group []string) []string {
 			}
 			continue
 		}
-		if usefulExpansionTerm(term) {
-			out = append(out, term)
+	}
+	return uniqueTerms(out)
+}
+
+func enrichExpansionGroup(group []string, availableTerms []string) []string {
+	category := expansionCategoryForGroup(group)
+	if category == CategoryUnknown {
+		return group
+	}
+	out := append([]string(nil), group...)
+	for _, fallback := range categoryFallbackTerms[category] {
+		if containsTermFold(out, fallback) || !containsTermFold(availableTerms, fallback) {
+			continue
+		}
+		out = append(out, fallback)
+		signal := expansionQuerySignalForTerms(out, nil)
+		if signal.SemanticTerms >= 2 || signal.TechnicalTerms >= 1 || signal.UsefulPhrases >= 1 {
+			break
 		}
 	}
 	return uniqueTerms(out)
+}
+
+func containsTermFold(values []string, term string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, term) {
+			return true
+		}
+	}
+	return false
 }
 
 func usefulExpansionTerm(term string) bool {
@@ -481,14 +525,11 @@ func usefulExpansionQuery(query string, originalQuestion string) bool {
 	if containsTranscriptFragment(query) {
 		return false
 	}
-	signals := highSignalTermCount(query)
-	if signals == 0 {
+	if mostlySpeechTokens(tokens) {
 		return false
 	}
-	if signals < 2 && mostlySpeechTokens(tokens) {
-		return false
-	}
-	return true
+	signal := expansionQuerySignalScore(query, compactQueryTopic(originalQuestion))
+	return signal.TechnicalTerms >= 1 || signal.UsefulPhrases >= 1 || signal.SemanticTerms >= 2
 }
 
 func usefulHintGroup(group []string) bool {
@@ -526,6 +567,56 @@ const (
 	CategoryModality ExpansionCategory = "modality"
 	CategoryPipeline ExpansionCategory = "pipeline"
 )
+
+type expansionSignal struct {
+	TechnicalTerms int
+	UsefulPhrases  int
+	SemanticTerms  int
+}
+
+func expansionQuerySignalScore(query string, topic string) expansionSignal {
+	topicTokens := normalizedQueryTokenSet(topic)
+	return expansionQuerySignalForTerms(strings.Fields(query), topicTokens)
+}
+
+func expansionQuerySignalForTerms(terms []string, topicTokens map[string]struct{}) expansionSignal {
+	var signal expansionSignal
+	joined := strings.ToLower(strings.Join(terms, " "))
+	for _, phrase := range highSignalExpansionPhrases {
+		if strings.Contains(joined, phrase) {
+			signal.UsefulPhrases++
+		}
+	}
+	seenSemantic := map[string]struct{}{}
+	for _, term := range terms {
+		for _, token := range normalizedQueryTokens(term) {
+			if _, ok := topicTokens[token]; ok {
+				continue
+			}
+			if _, ok := technicalExpansionTokens[token]; ok {
+				signal.TechnicalTerms++
+				continue
+			}
+			if _, ok := semanticExpansionTokens[token]; ok {
+				if _, seen := seenSemantic[token]; seen {
+					continue
+				}
+				seenSemantic[token] = struct{}{}
+				signal.SemanticTerms++
+			}
+		}
+	}
+	return signal
+}
+
+func normalizedQueryTokenSet(query string) map[string]struct{} {
+	tokens := normalizedQueryTokens(query)
+	out := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		out[token] = struct{}{}
+	}
+	return out
+}
 
 func expansionCategoryForGroup(group []string) ExpansionCategory {
 	counts := map[ExpansionCategory]int{}
@@ -721,6 +812,38 @@ var highSignalExpansionTokens = map[string]struct{}{
 	"workflow":  {},
 }
 
+var technicalExpansionTokens = map[string]struct{}{
+	"a3m":     {},
+	"fasta":   {},
+	"json":    {},
+	"mmseqs":  {},
+	"ncbi":    {},
+	"pdb":     {},
+	"uniprot": {},
+}
+
+var semanticExpansionTokens = map[string]struct{}{
+	"alignment":  {},
+	"alignments": {},
+	"dimer":      {},
+	"ligand":     {},
+	"metadata":   {},
+	"method":     {},
+	"methods":    {},
+	"monomer":    {},
+	"pipeline":   {},
+	"protein":    {},
+	"proteins":   {},
+	"sequence":   {},
+	"sequences":  {},
+	"species":    {},
+	"structure":  {},
+	"structures": {},
+	"version":    {},
+	"versions":   {},
+	"workflow":   {},
+}
+
 var usefulExpansionWords = map[string]struct{}{
 	"a3m":        {},
 	"alignment":  {},
@@ -749,6 +872,14 @@ var usefulExpansionWords = map[string]struct{}{
 	"version":    {},
 	"versions":   {},
 	"workflow":   {},
+}
+
+var categoryFallbackTerms = map[ExpansionCategory][]string{
+	CategoryArtifact: {"PDB", "JSON", "FASTA", "A3M"},
+	CategoryMetadata: {"method", "version", "metadata"},
+	CategorySpecies:  {"species", "NCBI", "UniProt", "sequence", "alignment"},
+	CategoryModality: {"monomer", "dimer", "ligand"},
+	CategoryPipeline: {"workflow", "pipeline", "alignment", "A3M"},
 }
 
 var transcriptNoiseFragments = []string{

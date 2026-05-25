@@ -140,6 +140,35 @@ func TestReadSourceToolOption(t *testing.T) {
 	}
 }
 
+func TestReadSourceOverlapPolicyOption(t *testing.T) {
+	tests := []struct {
+		name    string
+		policy  ReadSourceOverlapPolicy
+		want    agentask.ReadSourceOverlapPolicy
+		wantErr bool
+	}{
+		{name: "default skip", want: agentask.ReadSourceOverlapSkip},
+		{name: "skip", policy: ReadSourceOverlapSkip, want: agentask.ReadSourceOverlapSkip},
+		{name: "merge", policy: ReadSourceOverlapMerge, want: agentask.ReadSourceOverlapMerge},
+		{name: "allow", policy: ReadSourceOverlapAllow, want: agentask.ReadSourceOverlapAllow},
+		{name: "invalid", policy: ReadSourceOverlapPolicy("bogus"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readSourceOverlapPolicyOption(tt.policy)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("readSourceOverlapPolicyOption succeeded, want error")
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("readSourceOverlapPolicyOption = %q, %v; want %q, nil", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestEngineConfigFromEnvERejectsInvalidHeaders(t *testing.T) {
 	_, err := EngineConfigFromEnvE(func(key string) string {
 		if key == "FALKENGO_LLM_HEADERS" {

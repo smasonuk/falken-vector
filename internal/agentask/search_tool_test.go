@@ -608,6 +608,10 @@ func TestSearchIndexToolNormalizesDuplicateQueryTerms(t *testing.T) {
 	if seenQuery != "protein folding" {
 		t.Fatalf("query = %q, want duplicate term removed", seenQuery)
 	}
+	payload := decodeSearchPayload(t, result.Payload)
+	if !payload.QueryNormalized || payload.OriginalQuery != "protein folding folding" || payload.Query != "protein folding" {
+		t.Fatalf("payload = %+v, want original and normalized query fields", payload)
+	}
 }
 
 func TestMergeBroadSearchResultsInterleavesExpansionEvidence(t *testing.T) {
@@ -680,6 +684,9 @@ func TestSearchIndexToolPayloadIsValidJSON(t *testing.T) {
 	payload := decodeSearchPayload(t, result.Payload)
 	if !payload.Success || len(payload.Sources) != 1 || payload.Sources[0].Text != "raw chunk text" {
 		t.Fatalf("payload = %+v, want source payload", payload)
+	}
+	if payload.QueryNormalized || payload.OriginalQuery != "" {
+		t.Fatalf("payload = %+v, did not want original query when unchanged", payload)
 	}
 }
 

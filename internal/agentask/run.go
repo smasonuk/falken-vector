@@ -2,6 +2,7 @@ package agentask
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,7 +11,12 @@ import (
 	"github.com/smasonuk/falken-vector/internal/rag"
 )
 
-func Run(ctx context.Context, opts Options) (Result, error) {
+func Run(ctx context.Context, opts Options) (final Result, err error) {
+	defer func() {
+		if err == nil {
+			populateResultToolMetrics(&final)
+		}
+	}()
 	if strings.TrimSpace(opts.Question) == "" {
 		return Result{}, errors.New("question is required")
 	}
@@ -53,7 +59,10 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	})
 	agentTools := []falken.Tool{searchTool}
 	if opts.EnableReadSourceTool {
-		agentTools = append(agentTools, NewReadIndexSourceTool(ReadSourceToolOptions{Registry: registry}))
+		agentTools = append(agentTools, NewReadIndexSourceTool(ReadSourceToolOptions{
+			Registry:      registry,
+			OverlapPolicy: opts.ReadSourceOverlapPolicy,
+		}))
 	}
 
 	var capturedToolCalls []string
@@ -96,6 +105,8 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		ToolCalls: append([]string(nil), capturedToolCalls...),
 		Trace:     cloneAgentTrace(trace),
 	}
+	normalizeResultCitations(&result)
+	answer = result.Answer
 	policy := normalizeAgentCitationPolicy(opts.CitationPolicy)
 	if policy == rag.CitationPolicyOff {
 		result.CitationValid = true
@@ -120,6 +131,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		}
 		result.Retried = true
 		result.Answer = retryAnswer
+		normalizeResultCitations(&result)
 		result.Sources = registry.Sources()
 		result.ToolCalls = append([]string(nil), capturedToolCalls...)
 		result.Trace = cloneAgentTrace(trace)
@@ -145,6 +157,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 					result.Retried = true
 					result.CoverageNudged = true
 					result.Answer = retryAnswer
+					normalizeResultCitations(&result)
 					result.Sources = registry.Sources()
 					result.ToolCalls = append([]string(nil), capturedToolCalls...)
 					result.Trace = cloneAgentTrace(trace)
@@ -183,6 +196,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			result.Retried = true
 			result.ThinSourceNudged = true
 			result.Answer = retryAnswer
+			normalizeResultCitations(&result)
 			result.Sources = registry.Sources()
 			result.ToolCalls = append([]string(nil), capturedToolCalls...)
 			result.Trace = cloneAgentTrace(trace)
@@ -206,6 +220,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	result.Retried = true
 	result.Answer = retryAnswer
+	normalizeResultCitations(&result)
 	result.Sources = registry.Sources()
 	result.ToolCalls = append([]string(nil), capturedToolCalls...)
 	result.Trace = cloneAgentTrace(trace)
@@ -213,6 +228,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 }
 
 func validateRetryResult(result *Result, registry *CitationRegistry) (Result, error) {
+	normalizeResultCitations(result)
 	retryValidation := registry.Validate(result.Answer)
 	if unsupportedZeroSourceAnswer(retryValidation, result.Sources, result.ToolCalls, result.Answer) {
 		result.CitationValid = false
@@ -231,6 +247,70 @@ func validateRetryResult(result *Result, registry *CitationRegistry) (Result, er
 	return *result, nil
 }
 
+func normalizeResultCitations(result *Result) {
+	normalized, notes := rag.NormalizeGroupedCitations(result.Answer)
+	result.Answer = normalized
+	result.CitationNotes = appendUniqueStrings(result.CitationNotes, notes...)
+}
+
+func populateResultToolMetrics(result *Result) {
+	if result == nil {
+		return
+	}
+	searchCalls, retrievalCalls := agentToolMetrics(*result)
+	result.SearchToolCalls = searchCalls
+	result.RetrievalCalls = retrievalCalls
+}
+
+func agentToolMetrics(result Result) (int, int) {
+	searchCalls := 0
+	if len(result.Trace.ToolCalls) != 0 {
+		for _, call := range result.Trace.ToolCalls {
+			if call.Name == SearchIndexToolName {
+				searchCalls++
+			}
+		}
+	} else {
+		for _, name := range result.ToolCalls {
+			if name == SearchIndexToolName {
+				searchCalls++
+			}
+		}
+	}
+	retrievalCalls := 0
+	for _, toolResult := range result.Trace.ToolResults {
+		if toolResult.Name != SearchIndexToolName || len(toolResult.Payload) == 0 {
+			continue
+		}
+		var payload struct {
+			RetrievalCalls int `json:"retrieval_calls"`
+		}
+		if json.Unmarshal(toolResult.Payload, &payload) == nil {
+			retrievalCalls += payload.RetrievalCalls
+		}
+	}
+	return searchCalls, retrievalCalls
+}
+
+func appendUniqueStrings(values []string, additions ...string) []string {
+	seen := make(map[string]struct{}, len(values)+len(additions))
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	for _, value := range additions {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
+}
+
 func correctiveCitationPrompt(warnings []string, previousAnswer string) string {
 	return fmt.Sprintf(`Your previous answer had citation issues:
 
@@ -238,6 +318,8 @@ func correctiveCitationPrompt(warnings []string, previousAnswer string) string {
 
 Rewrite the answer using only source IDs returned by search_index.
 Every factual claim about indexed content must cite an existing [source N].
+Use one bracket per cited source: [source 2] [source 3].
+Never write [sources 2, 3], [source 2, 3], [source 2 and 3], or multiple source numbers inside one bracket.
 Do not cite source IDs that were not returned.
 If more evidence is needed, call search_index again.
 If the indexed corpus does not support the answer, say you do not know.
@@ -257,6 +339,8 @@ Either:
 
 Do not invent paths, line numbers, file contents, APIs, or source IDs.
 Do not cite [source N] unless search_index returned that source.
+Use one bracket per cited source: [source 2] [source 3].
+Never write [sources 2, 3], [source 2, 3], [source 2 and 3], or multiple source numbers inside one bracket.
 
 Previous answer:
 %s`, previousAnswer)

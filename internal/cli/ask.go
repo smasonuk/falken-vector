@@ -40,6 +40,7 @@ func newAskCommand(opts *options) *cobra.Command {
 	var maxAgentCoverageRetries int
 	var agentReadSourceTool bool
 	var noAgentReadSourceTool bool
+	var readSourceOverlapPolicy string
 	var maxAgentSearches int
 	var maxAgentExpansionQueries int
 	var maxAgentRetrievals int
@@ -104,6 +105,10 @@ func newAskCommand(opts *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
+				overlapPolicy, err := readSourceOverlapPolicyFromFlag(readSourceOverlapPolicy)
+				if err != nil {
+					return err
+				}
 				retrievalOpts.TopK = topK
 				retrievalOpts.Paths = paths
 				agentLLM, err := newCLIAgentLLMWithModel(model)
@@ -128,6 +133,7 @@ func newAskCommand(opts *options) *cobra.Command {
 					MinBroadSearchCalls:      minAgentSearches,
 					MaxCoverageRetries:       maxAgentCoverageRetries,
 					EnableReadSourceTool:     effectiveReadSourceTool,
+					ReadSourceOverlapPolicy:  overlapPolicy,
 				}
 				if showAgentTools {
 					toolPrinter := newAgentToolPrinter()
@@ -139,6 +145,7 @@ func newAskCommand(opts *options) *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("ask agent: %w", err)
 				}
+				result.Answer, result.CitationNotes = normalizeCLIAgentCitations(result.Answer, result.CitationNotes)
 				if openSource > 0 {
 					if err := openAnswerSource(cmd.ErrOrStderr(), result.Sources, openSource); err != nil {
 						return err
@@ -146,9 +153,13 @@ func newAskCommand(opts *options) *cobra.Command {
 				}
 				if showAgentTools {
 					printCoverageWarnings(cmd.ErrOrStderr(), result.CoverageWarnings)
+					printCitationNotes(cmd.ErrOrStderr(), result.CitationNotes)
 				}
 				printCitationWarnings(cmd.ErrOrStderr(), result.CitationWarnings)
-				printAnswerWithSourceMode(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode, showSourceProvenance, showAgentTools)
+				printAnswerWithSourceModeAndAudit(cmd.OutOrStdout(), result.Answer, result.Sources, effectiveSourcesMode, showSourceProvenance, showAgentTools, sourceAuditMetrics{
+					SearchToolCalls: result.SearchToolCalls,
+					RetrievalCalls:  result.RetrievalCalls,
+				})
 				return nil
 			}
 			if err := prepareLexicalIndex(ctx, store, retrievalOpts.Mode); err != nil {
@@ -228,6 +239,7 @@ func newAskCommand(opts *options) *cobra.Command {
 	cmd.Flags().IntVar(&maxAgentCoverageRetries, "max-agent-coverage-retries", 0, "maximum broad-question coverage retries in agent mode")
 	cmd.Flags().BoolVar(&agentReadSourceTool, "agent-read-source-tool", false, "enable the read_index_source tool in agent mode")
 	cmd.Flags().BoolVar(&noAgentReadSourceTool, "no-agent-read-source-tool", false, "disable automatic read_index_source use in agent mode")
+	cmd.Flags().StringVar(&readSourceOverlapPolicy, "read-source-overlap-policy", "skip", "read_index_source overlap handling: skip, merge, or allow")
 	addRetrievalFlags(cmd, &retrievalFlags)
 	addSourceFilterFlags(cmd, &sourceFlags)
 	return cmd
@@ -242,11 +254,21 @@ func printAnswerWithSourcesMode(w io.Writer, result rag.AskResult, sourcesMode s
 }
 
 func printAnswerWithSourceMode(w io.Writer, answer string, sources []rag.SourceChunk, sourcesMode string, showProvenance, showAuditProvenance bool) {
+	printAnswerWithSourceModeAndAudit(w, answer, sources, sourcesMode, showProvenance, showAuditProvenance, sourceAuditMetrics{})
+}
+
+type sourceAuditMetrics struct {
+	SearchToolCalls int
+	RetrievalCalls  int
+}
+
+func printAnswerWithSourceModeAndAudit(w io.Writer, answer string, sources []rag.SourceChunk, sourcesMode string, showProvenance, showAuditProvenance bool, auditMetrics sourceAuditMetrics) {
+	answer, _ = rag.NormalizeGroupedCitations(answer)
 	fmt.Fprintln(w, "Answer:")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, answer)
 	fmt.Fprintln(w)
-	printSourcesForMode(w, answer, sources, sourcesMode, showProvenance, showAuditProvenance)
+	printSourcesForModeWithAudit(w, answer, sources, sourcesMode, showProvenance, showAuditProvenance, auditMetrics)
 }
 
 func printAnswerText(w io.Writer, answer string, sources []rag.SourceChunk) {
@@ -263,13 +285,33 @@ func printCitationWarnings(w io.Writer, warnings []string) {
 	}
 }
 
+func printCitationNotes(w io.Writer, notes []string) {
+	seen := map[string]struct{}{}
+	for _, note := range notes {
+		note = strings.TrimSpace(note)
+		if note == "" {
+			continue
+		}
+		if _, ok := seen[note]; ok {
+			continue
+		}
+		seen[note] = struct{}{}
+		fmt.Fprintf(w, "agent citation note: %s\n", note)
+	}
+}
+
 func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, mode string, showProvenance, showAuditProvenance bool) {
+	printSourcesForModeWithAudit(w, answer, sources, mode, showProvenance, showAuditProvenance, sourceAuditMetrics{})
+}
+
+func printSourcesForModeWithAudit(w io.Writer, answer string, sources []rag.SourceChunk, mode string, showProvenance, showAuditProvenance bool, auditMetrics sourceAuditMetrics) {
+	answer, _ = rag.NormalizeGroupedCitations(answer)
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "cited":
 		printSourcesWithHeading(w, "Sources:", citedSourcesOnly(answer, sources))
 	case "all":
 		printAllSourcesWithCitationMarkers(w, answer, sources, showProvenance)
-		printSourceAudit(w, answer, sources, showAuditProvenance)
+		printSourceAudit(w, answer, sources, showAuditProvenance, auditMetrics)
 	case "both":
 		cited := citedSourcesOnly(answer, sources)
 		if len(cited) != 0 {
@@ -278,8 +320,32 @@ func printSourcesForMode(w io.Writer, answer string, sources []rag.SourceChunk, 
 			fmt.Fprintln(w, "No cited sources.")
 		}
 		printOtherSourcesWithCoverage(w, answer, sources, showProvenance)
-		printSourceAudit(w, answer, sources, showAuditProvenance)
+		printSourceAudit(w, answer, sources, showAuditProvenance, auditMetrics)
 	}
+}
+
+func normalizeCLIAgentCitations(answer string, existingNotes []string) (string, []string) {
+	normalized, notes := rag.NormalizeGroupedCitations(answer)
+	return normalized, appendUniqueNotes(existingNotes, notes...)
+}
+
+func appendUniqueNotes(values []string, additions ...string) []string {
+	seen := make(map[string]struct{}, len(values)+len(additions))
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	for _, value := range additions {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
 }
 
 func validateSourcesMode(mode string) error {
@@ -360,7 +426,7 @@ func printSourceProvenance(w io.Writer, source rag.SourceChunk, showProvenance b
 	fmt.Fprintln(w, line)
 }
 
-func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk, showProvenanceSummary bool) {
+func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk, showProvenanceSummary bool, metrics sourceAuditMetrics) {
 	if len(sources) == 0 {
 		return
 	}
@@ -375,6 +441,12 @@ func printSourceAudit(w io.Writer, answer string, sources []rag.SourceChunk, sho
 	fmt.Fprintf(w, "- available to agent: %d\n", len(sources))
 	fmt.Fprintf(w, "- cited in answer: %d\n", citedAvailable)
 	fmt.Fprintf(w, "- uncited: %d\n", len(sources)-citedAvailable)
+	if metrics.SearchToolCalls > 0 {
+		fmt.Fprintf(w, "- search tool calls: %d\n", metrics.SearchToolCalls)
+	}
+	if metrics.RetrievalCalls > 0 {
+		fmt.Fprintf(w, "- retrieval calls: %d\n", metrics.RetrievalCalls)
+	}
 	if showProvenanceSummary {
 		printSourceAuditProvenanceSummary(w, sources)
 	}
@@ -534,6 +606,19 @@ func agentReadSourceToolFromFlags(enable, disable, enableChanged bool, question 
 		return true, nil
 	}
 	return false, nil
+}
+
+func readSourceOverlapPolicyFromFlag(value string) (agentask.ReadSourceOverlapPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "skip":
+		return agentask.ReadSourceOverlapSkip, nil
+	case "merge":
+		return agentask.ReadSourceOverlapMerge, nil
+	case "allow":
+		return agentask.ReadSourceOverlapAllow, nil
+	default:
+		return "", errors.New("--read-source-overlap-policy must be skip, merge, or allow")
+	}
 }
 
 func checkAgentAskManifest(manifestPath string) error {

@@ -289,6 +289,115 @@ func TestRunRetriesInvalidCitationAnswerOnce(t *testing.T) {
 	}
 }
 
+func TestRunNormalizesGroupedCitationsBeforeValidation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"citation validation"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "Citation validation uses these files [sources 2, 3].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.RetrieveWithPlan = func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+		return rag.RetrieveResult{
+			Plan: rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+			Chunks: []rag.RetrievedChunk{
+				testRetrievedChunk("chunk-1", "one.md", "one", "indexed"),
+				testRetrievedChunk("chunk-2", "two.md", "two", "indexed"),
+				testRetrievedChunk("chunk-3", "three.md", "three", "indexed"),
+			},
+		}, nil
+	}
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Answer != "Citation validation uses these files [source 2] [source 3]." {
+		t.Fatalf("answer = %q, want normalized grouped citations", result.Answer)
+	}
+	if !result.CitationValid || result.Retried {
+		t.Fatalf("result = %+v, want valid without retry after normalization", result)
+	}
+	if len(result.CitationNotes) != 1 || !strings.Contains(result.CitationNotes[0], "normalized [sources 2, 3]") {
+		t.Fatalf("citation notes = %+v, want normalization note", result.CitationNotes)
+	}
+}
+
+func TestRunNormalizesGroupedCitationsBeforeThinSourceNudge(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	firstPath := filepath.Join(t.TempDir(), "alphafold-one.md")
+	secondPath := filepath.Join(t.TempDir(), "alphafold-two.md")
+	for _, path := range []string{firstPath, secondPath} {
+		if err := os.WriteFile(path, []byte("one\ntwo\nAlphaFold thin line\nfour\nfive\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
+		{
+			ToolCalls: []falken.ToolCall{{
+				ID:        "call-search",
+				Name:      SearchIndexToolName,
+				Arguments: json.RawMessage(`{"query":"AlphaFold","strategy":"focused"}`),
+			}},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold has relevant notes [sources 1, 2].", FinishReason: falken.FinishReasonStop},
+		{
+			ToolCalls: []falken.ToolCall{
+				{
+					ID:        "call-read-1",
+					Name:      ReadIndexSourceToolName,
+					Arguments: json.RawMessage(`{"source_number":1,"context_lines":20}`),
+				},
+				{
+					ID:        "call-read-2",
+					Name:      ReadIndexSourceToolName,
+					Arguments: json.RawMessage(`{"source_number":2,"context_lines":20}`),
+				},
+			},
+			FinishReason: falken.FinishReasonToolCalls,
+		},
+		{AssistantText: "AlphaFold has relevant notes [source 1] [source 2].", FinishReason: falken.FinishReasonStop},
+	}}
+	opts := testRunOptions(t, llm)
+	opts.Question = "summarize anything related to AlphaFold folding"
+	opts.EnableReadSourceTool = true
+	opts.CoverageNudge = boolPtr(false)
+	opts.RetrieveWithPlan = func(_ context.Context, _ manifest.Store, opts rag.RetrieveOptions) (rag.RetrieveResult, error) {
+		first := testRetrievedChunk("alphafold-one", firstPath, "AlphaFold thin line", "indexed")
+		first.Chunk.StartLine = 3
+		first.Chunk.EndLine = 3
+		second := testRetrievedChunk("alphafold-two", secondPath, "AlphaFold thin line", "indexed")
+		second.Chunk.StartLine = 3
+		second.Chunk.EndLine = 3
+		return rag.RetrieveResult{
+			Plan:   rag.QueryPlan{Mode: "none", Queries: []string{opts.Question}},
+			Chunks: []rag.RetrievedChunk{first, second},
+		}, nil
+	}
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.ThinSourceNudged {
+		t.Fatalf("result = %+v, want thin-source nudge after citation normalization", result)
+	}
+	prompt := lastUserPrompt(llm.requests[2])
+	if !strings.Contains(prompt, "[source 1], [source 2]") {
+		t.Fatalf("thin nudge prompt = %q, want both normalized cited sources", prompt)
+	}
+	if strings.Contains(result.Answer, "[sources") {
+		t.Fatalf("answer = %q, grouped citation should not remain", result.Answer)
+	}
+}
+
 func TestRunNoToolAnswerReturnsWarning(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	llm := &fakeAgentLLM{responses: []falken.CompletionResponse{
@@ -609,6 +718,9 @@ func TestRunThinSourceNudgeExpandsShortCitedSource(t *testing.T) {
 		"Previous answer:",
 		"not restarting",
 		"Preserve relevant points",
+		"[source 2] [source 3]",
+		"Never write [sources 2, 3]",
+		"one bracket per cited source",
 		"AlphaFold is mentioned in the notes [source 1].",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -721,6 +833,28 @@ func TestRunThinSourceNudgeSkippedWhenReadSourceDisabled(t *testing.T) {
 	}
 	if len(llm.requests) != 2 {
 		t.Fatalf("requests = %d, want only initial search run", len(llm.requests))
+	}
+}
+
+func TestPopulateResultToolMetricsCountsSearchAndRetrievalCalls(t *testing.T) {
+	result := Result{
+		ToolCalls: []string{SearchIndexToolName, ReadIndexSourceToolName},
+		Trace: AgentTrace{
+			ToolCalls: []ToolCallRecord{
+				{Name: SearchIndexToolName},
+				{Name: ReadIndexSourceToolName},
+				{Name: SearchIndexToolName},
+			},
+			ToolResults: []ToolResultRecord{
+				{Name: SearchIndexToolName, Payload: json.RawMessage(`{"retrieval_calls":3}`)},
+				{Name: ReadIndexSourceToolName, Payload: json.RawMessage(`{"status":"ok"}`)},
+				{Name: SearchIndexToolName, Payload: json.RawMessage(`{"retrieval_calls":2}`)},
+			},
+		},
+	}
+	populateResultToolMetrics(&result)
+	if result.SearchToolCalls != 2 || result.RetrievalCalls != 5 {
+		t.Fatalf("metrics = search %d retrieval %d, want 2 and 5", result.SearchToolCalls, result.RetrievalCalls)
 	}
 }
 

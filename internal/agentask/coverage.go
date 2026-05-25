@@ -162,6 +162,8 @@ Before finalizing, improve coverage:
 5. If the additional searches add no useful evidence, say that briefly.
 
 Do not invent facts. Cite only [source N] IDs returned by search_index.
+Use one bracket per cited source: [source 2] [source 3].
+Never write [sources 2, 3], [source 2, 3], [source 2 and 3], or multiple source numbers inside one bracket.
 
 Previous answer:
 %s`, searchCalls, question, remainingNeeded, previousAnswer)

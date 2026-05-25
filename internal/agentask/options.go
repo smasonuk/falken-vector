@@ -63,6 +63,9 @@ type Options struct {
 	ThinSourceContextLines  int
 
 	EnableReadSourceTool bool
+	// ReadSourceOverlapPolicy controls redundant read_index_source expansions.
+	// Empty defaults to skip.
+	ReadSourceOverlapPolicy ReadSourceOverlapPolicy
 
 	Events falken.EventSink
 }
@@ -70,6 +73,7 @@ type Options struct {
 type Result struct {
 	Answer             string
 	Sources            []rag.SourceChunk
+	CitationNotes      []string
 	CitationWarnings   []string
 	CitationValid      bool
 	CoverageWarnings   []string
@@ -79,6 +83,8 @@ type Result struct {
 	Retried            bool
 	ToolCalls          []string
 	Trace              AgentTrace
+	SearchToolCalls    int
+	RetrievalCalls     int
 }
 
 // AgentTrace records structured tool activity for an agent ask run.

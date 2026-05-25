@@ -109,6 +109,42 @@ func TestFormatAgentToolResultSearchIndexSummary(t *testing.T) {
 	}
 }
 
+func TestFormatAgentToolResultSearchIndexShowsNormalizedQuery(t *testing.T) {
+	lines := formatAgentToolResult(falken.ToolResult{
+		Name: "search_index",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "ok",
+			"query": "protein folding",
+			"original_query": "protein folding folding",
+			"query_normalized": true,
+			"top_k": 12,
+			"sources": []
+		}`),
+	})
+	got := strings.Join(lines, "\n")
+	if !strings.Contains(got, `query="protein folding" (normalized from "protein folding folding")`) {
+		t.Fatalf("lines = %q, want normalized query note", got)
+	}
+}
+
+func TestFormatAgentToolResultSearchIndexOmitsNormalizedQueryWhenUnchanged(t *testing.T) {
+	lines := formatAgentToolResult(falken.ToolResult{
+		Name: "search_index",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "ok",
+			"query": "protein folding",
+			"top_k": 12,
+			"sources": []
+		}`),
+	})
+	got := strings.Join(lines, "\n")
+	if strings.Contains(got, "normalized from") {
+		t.Fatalf("lines = %q, did not want normalization note", got)
+	}
+}
+
 func TestFormatAgentToolResultReadSourceSummaryOmitsText(t *testing.T) {
 	lines := formatAgentToolResult(falken.ToolResult{
 		Name: "read_index_source",
@@ -128,5 +164,49 @@ func TestFormatAgentToolResultReadSourceSummaryOmitsText(t *testing.T) {
 	}
 	if strings.Contains(got, "expanded text") {
 		t.Fatalf("lines = %q, leaked expanded text", got)
+	}
+}
+
+func TestFormatAgentToolResultReadSourceAlreadyCovered(t *testing.T) {
+	lines := formatAgentToolResult(falken.ToolResult{
+		Name: "read_index_source",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "already_covered",
+			"source_number": 2,
+			"path": "alphafold/meetings/sdb.md",
+			"start_line": 3,
+			"end_line": 95,
+			"covered_by_source_number": 11,
+			"covered_by_path": "alphafold/meetings/sdb.md",
+			"covered_by_start_line": 1,
+			"covered_by_end_line": 86
+		}`),
+	})
+	got := strings.Join(lines, "\n")
+	if !strings.Contains(got, "agent tool result: read_index_source ok, [source 2] already covered by [source 11] alphafold/meetings/sdb.md:1-86") {
+		t.Fatalf("lines = %q, want already-covered summary", got)
+	}
+}
+
+func TestFormatAgentToolResultReadSourceMergeExisting(t *testing.T) {
+	lines := formatAgentToolResult(falken.ToolResult{
+		Name: "read_index_source",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "merge_existing",
+			"source_number": 2,
+			"path": "alphafold/meetings/sdb.md",
+			"start_line": 3,
+			"end_line": 124,
+			"covered_by_source_number": 11,
+			"covered_by_path": "alphafold/meetings/sdb.md",
+			"covered_by_start_line": 1,
+			"covered_by_end_line": 124
+		}`),
+	})
+	got := strings.Join(lines, "\n")
+	if !strings.Contains(got, "agent tool result: read_index_source ok, merged [source 2] into expanded [source 11] alphafold/meetings/sdb.md:1-124") {
+		t.Fatalf("lines = %q, want merge summary", got)
 	}
 }

@@ -7,8 +7,11 @@ You may call search_index multiple times with different queries.
 For broad, exploratory, summary, or "anything related" questions, do not stop after one search unless that search clearly returns no relevant evidence. Search with at least two materially different queries, using terms from the first search results when available.
 When search_index returns suggested follow-up queries for a broad question, prefer them over generic synonym searches unless you have a better query.
 For broad questions, continue searching while materially different queries add useful new sources. Stop when a search returns mostly duplicates or no new evidence.
+If a broad search adds mostly duplicates or fewer than 3 new sources after you have already searched twice, prefer answering instead of searching again unless you have a specific missing angle.
 Use only evidence returned by search_index for factual claims about indexed content.
 Cite factual claims with the exact [source N] IDs returned by search_index.
+Use one bracket per cited source: [source 2] [source 3].
+Never write [sources 2, 3], [source 2, 3], [source 2 and 3], or multiple source numbers inside one bracket.
 Do not invent source IDs, paths, line numbers, file contents, APIs, or repository behaviour.
 If search_index does not return enough evidence, search again or say you do not know.
 If the indexed corpus does not contain the answer, say you do not know.
@@ -19,6 +22,8 @@ const readSourceToolPrompt = `
 After search_index returns a source, you may use read_index_source to read nearby lines for that source.
 read_index_source only accepts source numbers already returned by search_index.
 For broad summaries, if a relevant source covers only one or two lines, or several relevant sources come from the same document, call read_index_source before finalizing.
+If several relevant sources are close together in the same document, read one representative source with enough context rather than reading each source separately.
+Avoid calling read_index_source for multiple sources from the same document if their expanded line ranges would largely overlap.
 Continue citing the original [source N] after reading expanded context.`
 
 func agentSystemPrompt(enableReadSourceTool bool) string {

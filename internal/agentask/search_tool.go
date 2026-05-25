@@ -122,6 +122,12 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	if query == "" {
 		return failedSearchToolResult("invalid_arguments", "query is required", nil), nil
 	}
+	originalQuery := strings.TrimSpace(args.Query)
+	queryNormalized := originalQuery != "" && query != originalQuery
+	payloadOriginalQuery := ""
+	if queryNormalized {
+		payloadOriginalQuery = originalQuery
+	}
 
 	retrieveOpts := s.opts.RetrievalDefaults
 	topK, warnings := normalizeSearchTopK(args.TopK, retrieveOpts.TopK, s.opts.MaxTopK)
@@ -230,6 +236,8 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 		Success:          true,
 		Status:           "ok",
 		Query:            query,
+		OriginalQuery:    payloadOriginalQuery,
+		QueryNormalized:  queryNormalized,
 		Strategy:         strategy,
 		Retrieval:        string(retrieveOpts.Mode),
 		TopK:             retrieveOpts.TopK,
@@ -557,6 +565,8 @@ type searchToolPayload struct {
 	Success          bool                     `json:"success"`
 	Status           string                   `json:"status"`
 	Query            string                   `json:"query,omitempty"`
+	OriginalQuery    string                   `json:"original_query,omitempty"`
+	QueryNormalized  bool                     `json:"query_normalized,omitempty"`
 	Strategy         string                   `json:"strategy,omitempty"`
 	Retrieval        string                   `json:"retrieval,omitempty"`
 	TopK             int                      `json:"top_k,omitempty"`

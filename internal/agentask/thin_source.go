@@ -227,7 +227,7 @@ Previous answer:
 Call read_index_source for these source numbers:
 %s
 
-Use around %d context lines. Then revise only where the expanded context improves accuracy, support, or detail. Preserve relevant points from the previous answer if they remain supported by cited or available sources. Do not drop useful supported sections merely because they were not part of the newly expanded sources. If the answer is already supported, keep it concise and cite the same source numbers.`, question, previousAnswer, strings.Join(sourceRefs, ", "), contextLines)
+Use around %d context lines. Then revise only where the expanded context improves accuracy, support, or detail. Preserve relevant points from the previous answer if they remain supported by cited or available sources. Do not drop useful supported sections merely because they were not part of the newly expanded sources. When preserving points from the previous answer, preserve or rewrite their citations using the exact one-source-per-bracket format. Use one bracket per cited source: [source 2] [source 3]. Never write [sources 2, 3], [source 2, 3], [source 2 and 3], or multiple source numbers inside one bracket. If the answer is already supported, keep it concise and cite the same source numbers.`, question, previousAnswer, strings.Join(sourceRefs, ", "), contextLines)
 }
 
 func thinSourceNudgeWarning(sourceNumbers []int) string {

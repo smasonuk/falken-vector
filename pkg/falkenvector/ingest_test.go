@@ -28,15 +28,16 @@ func TestErrNoIndexMatchesInternalNoIndex(t *testing.T) {
 
 func TestPublicIngestTypesConstruct(t *testing.T) {
 	request := IngestRequest{
-		Root:              ".",
-		Extensions:        []string{"go", "md"},
-		ExcludeExtensions: []string{"tmp"},
-		ExcludeDirs:       []string{"fixtures"},
-		ChunkSize:         1200,
-		ChunkOverlap:      200,
-		ChunkerMode:       ChunkerAuto,
-		DryRun:            true,
-		SyncSource:        true,
+		Root:                 ".",
+		Extensions:           []string{"go", "md"},
+		ExcludeExtensions:    []string{"tmp"},
+		ExcludeDirs:          []string{"fixtures"},
+		ChunkSize:            1200,
+		ChunkOverlap:         200,
+		ChunkerMode:          ChunkerAuto,
+		DryRun:               true,
+		SyncSource:           true,
+		EmbeddingConcurrency: 2,
 	}
 	result := IngestResult{
 		Directory:      "/repo",
@@ -45,7 +46,7 @@ func TestPublicIngestTypesConstruct(t *testing.T) {
 		ChunksEmbedded: 0,
 		Warnings:       []string{"note"},
 	}
-	if request.ChunkerMode != ChunkerAuto || len(request.ExcludeExtensions) != 1 || len(request.ExcludeDirs) != 1 || result.Directory == "" || len(result.Warnings) != 1 {
+	if request.ChunkerMode != ChunkerAuto || request.EmbeddingConcurrency != 2 || len(request.ExcludeExtensions) != 1 || len(request.ExcludeDirs) != 1 || result.Directory == "" || len(result.Warnings) != 1 {
 		t.Fatalf("request=%+v result=%+v", request, result)
 	}
 }
@@ -72,6 +73,9 @@ func TestIngestRequestDefaultsMatchCLIIngestDefaults(t *testing.T) {
 	}
 	if request.ExcludeDirs != nil {
 		t.Fatalf("ExcludeDirs default = %+v, want nil", request.ExcludeDirs)
+	}
+	if request.EmbeddingConcurrency != 4 {
+		t.Fatalf("EmbeddingConcurrency default = %d, want 4", request.EmbeddingConcurrency)
 	}
 }
 
@@ -161,6 +165,17 @@ func TestEngineIngestRejectsInvalidChunker(t *testing.T) {
 	}
 	if got := eventTypes(events); !reflect.DeepEqual(got, []EventType{EventRunStarted, EventRunFailed}) {
 		t.Fatalf("events = %v, want run start/fail", got)
+	}
+}
+
+func TestEngineIngestRejectsInvalidEmbeddingConcurrency(t *testing.T) {
+	engine, err := NewEngine(EngineConfig{StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	_, err = engine.Ingest(context.Background(), IngestRequest{Root: t.TempDir(), DryRun: true, EmbeddingConcurrency: -1})
+	if err == nil || !strings.Contains(err.Error(), "embedding concurrency must be >= 0") {
+		t.Fatalf("Ingest error = %v, want embedding concurrency validation", err)
 	}
 }
 

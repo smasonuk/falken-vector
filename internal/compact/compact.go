@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smasonuk/falken-vector/internal/config"
@@ -21,15 +22,16 @@ import (
 var ErrPendingRunDetected = errors.New("pending ingest run detected; run `falkengo repair` before compacting")
 
 type Options struct {
-	Paths      config.Paths
-	Embedder   llm.Embedder
-	OpenVector func(context.Context, string, int) (vectorstore.Store, error)
-	DryRun     bool
-	KeepBackup bool
-	BatchSize  int
-	Verbose    bool
-	Out        io.Writer
-	Now        func() time.Time
+	Paths                config.Paths
+	Embedder             llm.Embedder
+	OpenVector           func(context.Context, string, int) (vectorstore.Store, error)
+	DryRun               bool
+	KeepBackup           bool
+	BatchSize            int
+	Verbose              bool
+	Out                  io.Writer
+	Now                  func() time.Time
+	EmbeddingConcurrency int
 }
 
 type Summary struct {
@@ -45,6 +47,10 @@ type Summary struct {
 }
 
 func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, error) {
+	embeddingConcurrency, err := normalizeEmbeddingConcurrency(opts.EmbeddingConcurrency)
+	if err != nil {
+		return Summary{}, err
+	}
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = 100
 	}
@@ -111,7 +117,7 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 		_ = os.RemoveAll(tempPath)
 	}()
 
-	updates, activeChunks, err := rebuildTempVectorDB(ctx, tempPath, compactStore, opts)
+	updates, activeChunks, err := rebuildTempVectorDB(ctx, tempPath, compactStore, opts, embeddingConcurrency)
 	if err != nil {
 		return summary, err
 	}
@@ -204,7 +210,7 @@ func forEachActiveIndexedChunkBatch(ctx context.Context, store manifest.CompactS
 	}
 }
 
-func rebuildTempVectorDB(ctx context.Context, tempPath string, store manifest.CompactStore, opts Options) ([]manifest.ChunkVectorUpdate, int, error) {
+func rebuildTempVectorDB(ctx context.Context, tempPath string, store manifest.CompactStore, opts Options, embeddingConcurrency int) ([]manifest.ChunkVectorUpdate, int, error) {
 	var vectorDB vectorstore.Store
 	closeVector := func() error {
 		if vectorDB == nil {
@@ -219,15 +225,13 @@ func rebuildTempVectorDB(ctx context.Context, tempPath string, store manifest.Co
 	updates := make([]manifest.ChunkVectorUpdate, 0)
 	dimensions := 0
 	activeChunks, err := forEachActiveIndexedChunkBatch(ctx, store, opts.BatchSize, func(batch []manifest.Chunk) error {
-		for _, chunk := range batch {
-			if opts.Embedder == nil {
-				return errors.New("embedder is required")
-			}
-			verbosef(opts, "re-embedding chunk %s\n", chunk.ID)
-			embedding, err := opts.Embedder.EmbedText(ctx, textForEmbedding(chunk))
-			if err != nil {
-				return fmt.Errorf("embed chunk %s: %w", chunk.ID, err)
-			}
+		embedded, err := embedChunkBatch(ctx, batch, opts, embeddingConcurrency)
+		if err != nil {
+			return err
+		}
+		for _, item := range embedded {
+			chunk := item.Chunk
+			embedding := item.Embedding
 			if len(embedding.Vector) == 0 {
 				return fmt.Errorf("embed chunk %s: empty vector", chunk.ID)
 			}
@@ -266,6 +270,102 @@ func rebuildTempVectorDB(ctx context.Context, tempPath string, store manifest.Co
 		return nil, activeChunks, fmt.Errorf("close compact vector database: %w", err)
 	}
 	return updates, activeChunks, nil
+}
+
+type embeddedChunk struct {
+	Chunk     manifest.Chunk
+	Embedding llm.Embedding
+}
+
+type embedChunkResult struct {
+	Index     int
+	Embedding llm.Embedding
+	Err       error
+}
+
+func embedChunkBatch(ctx context.Context, batch []manifest.Chunk, opts Options, concurrency int) ([]embeddedChunk, error) {
+	if opts.Embedder == nil {
+		return nil, errors.New("embedder is required")
+	}
+	if len(batch) == 0 {
+		return nil, nil
+	}
+	if concurrency <= 1 {
+		out := make([]embeddedChunk, 0, len(batch))
+		for _, chunk := range batch {
+			verbosef(opts, "re-embedding chunk %s\n", chunk.ID)
+			embedding, err := opts.Embedder.EmbedText(ctx, textForEmbedding(chunk))
+			if err != nil {
+				return nil, fmt.Errorf("embed chunk %s: %w", chunk.ID, err)
+			}
+			out = append(out, embeddedChunk{Chunk: chunk, Embedding: embedding})
+		}
+		return out, nil
+	}
+	if concurrency > len(batch) {
+		concurrency = len(batch)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobCh := make(chan int)
+	resultCh := make(chan embedChunkResult, len(batch))
+	var wg sync.WaitGroup
+	var verboseMu sync.Mutex
+	for worker := 0; worker < concurrency; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobCh {
+				chunk := batch[index]
+				verboseMu.Lock()
+				verbosef(opts, "re-embedding chunk %s\n", chunk.ID)
+				verboseMu.Unlock()
+				embedding, err := opts.Embedder.EmbedText(ctx, textForEmbedding(chunk))
+				if err != nil {
+					resultCh <- embedChunkResult{Index: index, Err: fmt.Errorf("embed chunk %s: %w", chunk.ID, err)}
+					cancel()
+					continue
+				}
+				resultCh <- embedChunkResult{Index: index, Embedding: embedding}
+			}
+		}()
+	}
+
+	sendErr := error(nil)
+	for index := range batch {
+		if sendErr != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			sendErr = ctx.Err()
+		case jobCh <- index:
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	close(resultCh)
+
+	out := make([]embeddedChunk, len(batch))
+	received := 0
+	var firstErr error
+	for result := range resultCh {
+		received++
+		if result.Err != nil && firstErr == nil {
+			firstErr = result.Err
+			continue
+		}
+		out[result.Index] = embeddedChunk{Chunk: batch[result.Index], Embedding: result.Embedding}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if sendErr != nil {
+		return nil, sendErr
+	}
+	return out[:received], nil
 }
 
 func textForEmbedding(chunk manifest.Chunk) string {
@@ -309,6 +409,16 @@ func pathExists(path string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func normalizeEmbeddingConcurrency(value int) (int, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("embedding concurrency must be >= 0")
+	}
+	if value == 0 {
+		return config.DefaultEmbeddingConcurrency, nil
+	}
+	return value, nil
 }
 
 func verbosef(opts Options, format string, args ...any) {

@@ -484,6 +484,17 @@ func TestEngineCompactDryRunReturnsSummaryEventsAndIsSilent(t *testing.T) {
 	}
 }
 
+func TestEngineCompactRejectsInvalidEmbeddingConcurrency(t *testing.T) {
+	engine, err := NewEngine(EngineConfig{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	_, err = engine.Compact(context.Background(), CompactRequest{DryRun: true, EmbeddingConcurrency: -1})
+	if err == nil || !strings.Contains(err.Error(), "embedding concurrency must be >= 0") {
+		t.Fatalf("Compact error = %v, want embedding concurrency validation", err)
+	}
+}
+
 func seedEngineManifest(t *testing.T, stateDir string) {
 	t.Helper()
 	ctx := context.Background()

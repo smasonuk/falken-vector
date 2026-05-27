@@ -21,6 +21,7 @@ func newIngestCommand(opts *options) *cobra.Command {
 	var chunker string
 	var dryRun bool
 	var syncSource bool
+	var embeddingConcurrency int
 	cmd := &cobra.Command{
 		Use:   "ingest <directory>",
 		Short: "Index text files from a directory",
@@ -28,6 +29,9 @@ func newIngestCommand(opts *options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := longRunningCommandContext(cmd, opts)
 			defer cancel()
+			if embeddingConcurrency < 1 {
+				return fmt.Errorf("--embedding-concurrency must be >= 1")
+			}
 
 			paths, err := resolvePaths(opts)
 			if err != nil {
@@ -77,19 +81,20 @@ func newIngestCommand(opts *options) *cobra.Command {
 				return err
 			}
 			summary, err := ingest.Run(ctx, store, ingest.Options{
-				Root:              args[0],
-				Paths:             paths,
-				Extensions:        ingest.ParseExtensions(extensions),
-				ExcludeExtensions: ingest.ParseExtensions(excludeExtensions),
-				ExcludeDirs:       ingest.ParseCSVList(excludeDirs),
-				ChunkSize:         chunkSize,
-				ChunkOverlap:      chunkOverlap,
-				ChunkerMode:       chunkerMode,
-				DryRun:            dryRun,
-				SyncSource:        syncSource,
-				Verbose:           opts.verbose,
-				Out:               cmd.OutOrStdout(),
-				Embedder:          embedder,
+				Root:                 args[0],
+				Paths:                paths,
+				Extensions:           ingest.ParseExtensions(extensions),
+				ExcludeExtensions:    ingest.ParseExtensions(excludeExtensions),
+				ExcludeDirs:          ingest.ParseCSVList(excludeDirs),
+				ChunkSize:            chunkSize,
+				ChunkOverlap:         chunkOverlap,
+				ChunkerMode:          chunkerMode,
+				DryRun:               dryRun,
+				SyncSource:           syncSource,
+				Verbose:              opts.verbose,
+				Out:                  cmd.OutOrStdout(),
+				Embedder:             embedder,
+				EmbeddingConcurrency: embeddingConcurrency,
 			})
 			ingest.PrintSummary(cmd.OutOrStdout(), summary)
 			return err
@@ -103,5 +108,6 @@ func newIngestCommand(opts *options) *cobra.Command {
 	cmd.Flags().IntVar(&chunkOverlap, "chunk-overlap", 200, "overlap in characters for fixed chunking and large-section fallback")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "scan and classify files without writing vectors or manifest chunks")
 	cmd.Flags().BoolVar(&syncSource, "sync-source", false, "mark indexed files missing from this source directory as deleted")
+	cmd.Flags().IntVar(&embeddingConcurrency, "embedding-concurrency", config.DefaultEmbeddingConcurrency, "number of concurrent embedding requests for changed/new files")
 	return cmd
 }

@@ -182,6 +182,11 @@ func (e *Engine) Ingest(ctx context.Context, request IngestRequest) (IngestResul
 		emitter.emitError(EventRunFailed, err)
 		return result, err
 	}
+	if normalized.EmbeddingConcurrency < 0 {
+		err := errors.New("embedding concurrency must be >= 0")
+		emitter.emitError(EventRunFailed, err)
+		return result, err
+	}
 
 	chunkerMode, err := ingest.ParseChunkerMode(string(normalized.ChunkerMode))
 	if err != nil {
@@ -252,19 +257,20 @@ func (e *Engine) Ingest(ctx context.Context, request IngestRequest) (IngestResul
 		Ingest: &IngestEvent{Directory: directory},
 	})
 	summary, err := ingest.Run(ctx, store, ingest.Options{
-		Root:              normalized.Root,
-		Paths:             e.paths,
-		Extensions:        append([]string(nil), normalized.Extensions...),
-		ExcludeExtensions: append([]string(nil), normalized.ExcludeExtensions...),
-		ExcludeDirs:       append([]string(nil), normalized.ExcludeDirs...),
-		ChunkSize:         normalized.ChunkSize,
-		ChunkOverlap:      normalized.ChunkOverlap,
-		ChunkerMode:       chunkerMode,
-		DryRun:            normalized.DryRun,
-		SyncSource:        normalized.SyncSource,
-		Verbose:           false,
-		Out:               io.Discard,
-		Embedder:          embedder,
+		Root:                 normalized.Root,
+		Paths:                e.paths,
+		Extensions:           append([]string(nil), normalized.Extensions...),
+		ExcludeExtensions:    append([]string(nil), normalized.ExcludeExtensions...),
+		ExcludeDirs:          append([]string(nil), normalized.ExcludeDirs...),
+		ChunkSize:            normalized.ChunkSize,
+		ChunkOverlap:         normalized.ChunkOverlap,
+		ChunkerMode:          chunkerMode,
+		DryRun:               normalized.DryRun,
+		SyncSource:           normalized.SyncSource,
+		Verbose:              false,
+		Out:                  io.Discard,
+		Embedder:             embedder,
+		EmbeddingConcurrency: normalized.EmbeddingConcurrency,
 		Progress: func(event ingest.ProgressEvent) {
 			ingestEvent := publicIngestProgressEvent(event)
 			if ingestEvent.Directory == "" {
@@ -297,6 +303,11 @@ func (e *Engine) Compact(ctx context.Context, request CompactRequest) (CompactRe
 	}
 	emitter := newEventEmitter(e.eventSink())
 	emitter.emit(Event{Type: EventRunStarted, Message: "compact"})
+	if request.EmbeddingConcurrency < 0 {
+		err := errors.New("embedding concurrency must be >= 0")
+		emitter.emitError(EventRunFailed, err)
+		return CompactResult{}, err
+	}
 	if _, err := os.Stat(e.paths.ManifestPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			emitter.emitError(EventRunFailed, rag.ErrNoIndex)
@@ -342,12 +353,13 @@ func (e *Engine) Compact(ctx context.Context, request CompactRequest) (CompactRe
 		embedder = observableEmbedder{next: embedder, emit: emitter, config: e.config.Observability}
 	}
 	summary, err := compact.Run(ctx, store, compact.Options{
-		Paths:      e.paths,
-		Embedder:   embedder,
-		DryRun:     request.DryRun,
-		KeepBackup: request.KeepBackup,
-		BatchSize:  request.BatchSize,
-		Out:        io.Discard,
+		Paths:                e.paths,
+		Embedder:             embedder,
+		DryRun:               request.DryRun,
+		KeepBackup:           request.KeepBackup,
+		BatchSize:            request.BatchSize,
+		Out:                  io.Discard,
+		EmbeddingConcurrency: request.EmbeddingConcurrency,
 	})
 	result := compactResult(summary, request.DryRun)
 	for _, warning := range result.Warnings {
@@ -844,6 +856,9 @@ func normalizeIngestRequest(request IngestRequest) IngestRequest {
 	if out.ChunkerMode == "" {
 		out.ChunkerMode = ChunkerAuto
 	}
+	if out.EmbeddingConcurrency == 0 {
+		out.EmbeddingConcurrency = internalconfig.DefaultEmbeddingConcurrency
+	}
 	return out
 }
 
@@ -955,10 +970,10 @@ func agentCoverageNudgeOption(policy AgentCoveragePolicy) (*bool, error) {
 func readSourceToolOption(policy ReadSourcePolicy, legacyEnabled bool, question string) (bool, error) {
 	switch policy {
 	case ReadSourcePolicyDefault, ReadSourcePolicyAuto:
-		if legacyEnabled {
-			return true, nil
-		}
-		return agentask.IsBroadQuestion(question), nil
+		// if legacyEnabled {
+		return true, nil
+		// }
+		// return agentask.IsBroadQuestion(question), nil
 	case ReadSourcePolicyOn:
 		return true, nil
 	case ReadSourcePolicyOff:

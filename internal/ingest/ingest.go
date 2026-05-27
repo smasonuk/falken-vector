@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smasonuk/falken-vector/internal/config"
@@ -21,22 +22,23 @@ import (
 var ErrPendingRunDetected = errors.New("Pending ingest run detected. Run `falkengo repair`.")
 
 type Options struct {
-	Root              string
-	Paths             config.Paths
-	Extensions        []string
-	ExcludeExtensions []string
-	ExcludeDirs       []string
-	ChunkSize         int
-	ChunkOverlap      int
-	ChunkerMode       ChunkerMode
-	DryRun            bool
-	SyncSource        bool
-	Verbose           bool
-	Out               io.Writer
-	Embedder          llm.Embedder
-	OpenVector        func(context.Context, string, int) (vectorstore.Store, error)
-	Now               func() time.Time
-	Progress          func(ProgressEvent)
+	Root                 string
+	Paths                config.Paths
+	Extensions           []string
+	ExcludeExtensions    []string
+	ExcludeDirs          []string
+	ChunkSize            int
+	ChunkOverlap         int
+	ChunkerMode          ChunkerMode
+	DryRun               bool
+	SyncSource           bool
+	Verbose              bool
+	Out                  io.Writer
+	Embedder             llm.Embedder
+	OpenVector           func(context.Context, string, int) (vectorstore.Store, error)
+	Now                  func() time.Time
+	Progress             func(ProgressEvent)
+	EmbeddingConcurrency int
 }
 
 type Summary struct {
@@ -76,6 +78,10 @@ type pendingIndexer interface {
 }
 
 func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, error) {
+	embeddingConcurrency, err := normalizeEmbeddingConcurrency(opts.EmbeddingConcurrency)
+	if err != nil {
+		return Summary{}, err
+	}
 	if opts.ChunkSize == 0 {
 		opts.ChunkSize = 1200
 	}
@@ -90,6 +96,9 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 	}
 	if opts.OpenVector == nil {
 		opts.OpenVector = vectorstore.Open
+	}
+	if !opts.DryRun && embeddingConcurrency > 1 {
+		opts = synchronizedOptions(opts)
 	}
 	if !opts.DryRun && opts.Embedder == nil {
 		return Summary{}, fmt.Errorf("embedder is required")
@@ -136,7 +145,7 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 		TotalFiles: len(files),
 	})
 	discoveredPaths := make(map[string]struct{}, len(files))
-	var vectorDB vectorstore.Store
+	vectorDB := &vectorWriter{opts: opts}
 	pending := make([]indexedDocument, 0)
 	pendingStore, usePendingStore := store.(pendingIndexer)
 	runID := ""
@@ -147,11 +156,10 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 		}
 	}
 	defer func() {
-		if vectorDB != nil {
-			_ = vectorDB.Close()
-		}
+		_ = vectorDB.Close()
 	}()
 
+	jobs := make([]indexJob, 0)
 	for i, candidate := range files {
 		if err := ctx.Err(); err != nil {
 			clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
@@ -199,7 +207,17 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 		}
 
 		progressFileDecision(opts, sourceRoot, candidate.Path, decision, i+1, len(files))
-		indexed, err := indexFile(ctx, &vectorDB, candidate, sourceRoot, contentHash, effectiveChunker, opts)
+		if !opts.DryRun {
+			jobs = append(jobs, indexJob{
+				ResultIndex:      len(jobs),
+				Candidate:        candidate,
+				SourceRoot:       sourceRoot,
+				ContentHash:      contentHash,
+				EffectiveChunker: effectiveChunker,
+			})
+			continue
+		}
+		indexed, err := indexFile(ctx, nil, candidate, sourceRoot, contentHash, effectiveChunker, opts)
 		if err != nil {
 			if isContextStop(ctx, err) {
 				clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
@@ -226,6 +244,40 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 		}
 		summary.ChunksEmbedded += len(indexed.Chunks)
 	}
+	if !opts.DryRun && len(jobs) != 0 {
+		results, err := indexJobs(ctx, jobs, vectorDB, opts, embeddingConcurrency)
+		if err != nil {
+			clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
+			return summary, ingestStoppedError(ctx, err)
+		}
+		for _, result := range results {
+			candidate := result.Job.Candidate
+			if result.Err != nil {
+				if isContextStop(ctx, result.Err) {
+					clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
+					return summary, ingestStoppedError(ctx, result.Err)
+				}
+				summary.FailedFiles++
+				_ = markCandidateError(ctx, store, candidate, result.Job.ContentHash, opts.Now(), result.Err)
+				verbosef(opts, "failed to index %s: %v\n", candidate.Path, result.Err)
+				continue
+			}
+			indexed := result.Indexed
+			if usePendingStore {
+				if err := pendingStore.StagePendingDocument(ctx, runID, indexed.Document, indexed.Chunks); err != nil {
+					if isContextStop(ctx, err) {
+						clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
+						return summary, ingestStoppedError(ctx, err)
+					}
+					_ = pendingStore.ClearPendingRun(context.Background(), runID)
+					return summary, fmt.Errorf("stage manifest rows for %s: %w", indexed.Document.Path, err)
+				}
+			} else {
+				pending = append(pending, indexed)
+			}
+			summary.ChunksEmbedded += len(indexed.Chunks)
+		}
+	}
 
 	if err := ctx.Err(); err != nil {
 		clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
@@ -241,7 +293,7 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 	}
 	summary.DeletedFiles = len(deletedIDs)
 
-	if vectorDB != nil && !opts.DryRun {
+	if vectorDB.HasStore() && !opts.DryRun {
 		if err := ctx.Err(); err != nil {
 			clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
 			return summary, ingestStoppedError(ctx, err)
@@ -305,7 +357,142 @@ type indexedDocument struct {
 	Chunks   []manifest.Chunk
 }
 
-func indexFile(ctx context.Context, vectorDB *vectorstore.Store, candidate CandidateFile, sourceRoot string, contentHash string, effectiveChunker ChunkerMode, opts Options) (indexedDocument, error) {
+type indexJob struct {
+	ResultIndex      int
+	Candidate        CandidateFile
+	SourceRoot       string
+	ContentHash      string
+	EffectiveChunker ChunkerMode
+}
+
+type indexResult struct {
+	Job     indexJob
+	Indexed indexedDocument
+	Err     error
+}
+
+func indexJobs(ctx context.Context, jobs []indexJob, vectorDB *vectorWriter, opts Options, concurrency int) ([]indexResult, error) {
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	if concurrency <= 1 {
+		results := make([]indexResult, 0, len(jobs))
+		for _, job := range jobs {
+			if err := ctx.Err(); err != nil {
+				return results, err
+			}
+			indexed, err := indexFile(ctx, vectorDB, job.Candidate, job.SourceRoot, job.ContentHash, job.EffectiveChunker, opts)
+			results = append(results, indexResult{Job: job, Indexed: indexed, Err: err})
+		}
+		return results, nil
+	}
+	if concurrency > len(jobs) {
+		concurrency = len(jobs)
+	}
+
+	jobCh := make(chan indexJob)
+	resultCh := make(chan indexResult, len(jobs))
+	var wg sync.WaitGroup
+	for worker := 0; worker < concurrency; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobCh {
+				if err := ctx.Err(); err != nil {
+					resultCh <- indexResult{Job: job, Err: err}
+					continue
+				}
+				indexed, err := indexFile(ctx, vectorDB, job.Candidate, job.SourceRoot, job.ContentHash, job.EffectiveChunker, opts)
+				resultCh <- indexResult{Job: job, Indexed: indexed, Err: err}
+			}
+		}()
+	}
+
+	sendErr := error(nil)
+	for _, job := range jobs {
+		if sendErr != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			sendErr = ctx.Err()
+		case jobCh <- job:
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]indexResult, len(jobs))
+	received := 0
+	for result := range resultCh {
+		results[result.Job.ResultIndex] = result
+		received++
+	}
+	if sendErr != nil {
+		return results[:received], sendErr
+	}
+	return results, nil
+}
+
+type vectorWriter struct {
+	mu    sync.Mutex
+	store vectorstore.Store
+	opts  Options
+}
+
+func (w *vectorWriter) Insert(ctx context.Context, vector []float32, chunkID string) (int64, error) {
+	if w == nil {
+		return 0, errors.New("vector writer is required")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.store == nil {
+		store, err := w.opts.OpenVector(ctx, w.opts.Paths.VecgoPath, len(vector))
+		if err != nil {
+			return 0, fmt.Errorf("open vector database: %w", err)
+		}
+		w.store = store
+	}
+	return w.store.Insert(ctx, vector, chunkID)
+}
+
+func (w *vectorWriter) HasStore() bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.store != nil
+}
+
+func (w *vectorWriter) Commit(ctx context.Context) error {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.store == nil {
+		return nil
+	}
+	return w.store.Commit(ctx)
+}
+
+func (w *vectorWriter) Close() error {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.store == nil {
+		return nil
+	}
+	err := w.store.Close()
+	w.store = nil
+	return err
+}
+
+func indexFile(ctx context.Context, vectorDB *vectorWriter, candidate CandidateFile, sourceRoot string, contentHash string, effectiveChunker ChunkerMode, opts Options) (indexedDocument, error) {
 	body, err := os.ReadFile(candidate.Path)
 	if err != nil {
 		return indexedDocument{}, fmt.Errorf("read file: %w", err)
@@ -351,15 +538,8 @@ func indexFile(ctx context.Context, vectorDB *vectorstore.Store, candidate Candi
 		if len(embedding.Vector) == 0 {
 			return indexedDocument{}, fmt.Errorf("embed chunk %d for %s: empty vector", chunk.Index, candidate.Path)
 		}
-		if *vectorDB == nil {
-			store, err := opts.OpenVector(ctx, opts.Paths.VecgoPath, len(embedding.Vector))
-			if err != nil {
-				return indexedDocument{}, fmt.Errorf("open vector database: %w", err)
-			}
-			*vectorDB = store
-		}
 		chunkID := manifest.ChunkID(docID, chunk.Index, chunk.Hash)
-		vectorID, err := (*vectorDB).Insert(ctx, embedding.Vector, chunkID)
+		vectorID, err := vectorDB.Insert(ctx, embedding.Vector, chunkID)
 		if err != nil {
 			return indexedDocument{}, fmt.Errorf("insert vector for chunk %d in %s: %w", chunk.Index, candidate.Path, err)
 		}
@@ -461,6 +641,42 @@ func ParseCSVList(value string) []string {
 
 func DefaultExtensionsString() string {
 	return strings.Join(DefaultExtensions, ",")
+}
+
+func normalizeEmbeddingConcurrency(value int) (int, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("embedding concurrency must be >= 0")
+	}
+	if value == 0 {
+		return config.DefaultEmbeddingConcurrency, nil
+	}
+	return value, nil
+}
+
+type lockedWriter struct {
+	mu   *sync.Mutex
+	next io.Writer
+}
+
+func (w lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.next.Write(p)
+}
+
+func synchronizedOptions(opts Options) Options {
+	var outMu sync.Mutex
+	opts.Out = lockedWriter{mu: &outMu, next: opts.Out}
+	if opts.Progress != nil {
+		progress := opts.Progress
+		var progressMu sync.Mutex
+		opts.Progress = func(event ProgressEvent) {
+			progressMu.Lock()
+			defer progressMu.Unlock()
+			progress(event)
+		}
+	}
+	return opts
 }
 
 func verbosef(opts Options, format string, args ...any) {

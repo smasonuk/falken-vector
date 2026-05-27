@@ -59,6 +59,42 @@ func TestIngestHelpDescribesExtensionsAsRestriction(t *testing.T) {
 	if !strings.Contains(out.String(), "exclude comma-separated directory names") {
 		t.Fatalf("ingest help output = %q, want --exclude-dirs help", out.String())
 	}
+	if !strings.Contains(out.String(), "--embedding-concurrency") {
+		t.Fatalf("ingest help output = %q, want --embedding-concurrency help", out.String())
+	}
+}
+
+func TestCompactHelpDescribesEmbeddingConcurrency(t *testing.T) {
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"compact", "--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out.String(), "--embedding-concurrency") {
+		t.Fatalf("compact help output = %q, want --embedding-concurrency help", out.String())
+	}
+}
+
+func TestEmbeddingConcurrencyFlagsRejectInvalidValues(t *testing.T) {
+	root := t.TempDir()
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "ingest", args: []string{"ingest", root, "--dry-run", "--embedding-concurrency", "0"}},
+		{name: "compact", args: []string{"compact", "--dry-run", "--embedding-concurrency", "0"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := NewRootCommand()
+			cmd.SetArgs(tt.args)
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), "--embedding-concurrency must be >= 1") {
+				t.Fatalf("Execute error = %v, want embedding concurrency validation", err)
+			}
+		})
+	}
 }
 
 func TestCommandContextUsesDefaultTimeout(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/smasonuk/falken-vector/internal/compact"
 	"github.com/smasonuk/falken-vector/internal/config"
@@ -18,12 +19,16 @@ func newCompactCommand(opts *options) *cobra.Command {
 	var dryRun bool
 	var keepBackup bool
 	var batchSize int
+	var embeddingConcurrency int
 	cmd := &cobra.Command{
 		Use:   "compact",
 		Short: "Rebuild the vector database from active manifest chunks",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cancel := longRunningCommandContext(cmd, opts)
 			defer cancel()
+			if embeddingConcurrency < 1 {
+				return fmt.Errorf("--embedding-concurrency must be >= 1")
+			}
 
 			paths, err := resolvePaths(opts)
 			if err != nil {
@@ -57,13 +62,14 @@ func newCompactCommand(opts *options) *cobra.Command {
 			}
 
 			summary, err := compact.Run(ctx, store, compact.Options{
-				Paths:      paths,
-				Embedder:   &lazyEnvEmbedder{},
-				DryRun:     dryRun,
-				KeepBackup: keepBackup,
-				BatchSize:  batchSize,
-				Verbose:    opts.verbose,
-				Out:        cmd.OutOrStdout(),
+				Paths:                paths,
+				Embedder:             &lazyEnvEmbedder{},
+				DryRun:               dryRun,
+				KeepBackup:           keepBackup,
+				BatchSize:            batchSize,
+				Verbose:              opts.verbose,
+				Out:                  cmd.OutOrStdout(),
+				EmbeddingConcurrency: embeddingConcurrency,
 			})
 			if err == nil || dryRun || summary.ActiveChunks > 0 || summary.ReembeddedChunks > 0 {
 				compact.PrintSummary(cmd.OutOrStdout(), summary, dryRun)
@@ -74,18 +80,20 @@ func newCompactCommand(opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be compacted without writing vectors or manifest updates")
 	cmd.Flags().BoolVar(&keepBackup, "keep-backup", false, "keep the old vector database backup after a successful compact")
 	cmd.Flags().IntVar(&batchSize, "batch-size", 100, "number of manifest chunks to fetch and process per batch")
+	cmd.Flags().IntVar(&embeddingConcurrency, "embedding-concurrency", config.DefaultEmbeddingConcurrency, "number of concurrent embedding requests during compaction")
 	return cmd
 }
 
 type lazyEnvEmbedder struct {
+	once     sync.Once
 	embedder llm.Embedder
 	err      error
 }
 
 func (e *lazyEnvEmbedder) EmbedText(ctx context.Context, input string) (llm.Embedding, error) {
-	if e.embedder == nil && e.err == nil {
+	e.once.Do(func() {
 		e.embedder, e.err = llm.NewEnvEmbedder(os.Getenv)
-	}
+	})
 	if e.err != nil {
 		return llm.Embedding{}, e.err
 	}

@@ -293,15 +293,16 @@ const (
 // Root defaults to ".". ChunkSize defaults to the CLI/internal ingest default.
 // ChunkOverlap defaults to the CLI default. ChunkerMode defaults to ChunkerAuto.
 type IngestRequest struct {
-	Root              string
-	Extensions        []string
-	ExcludeExtensions []string
-	ExcludeDirs       []string
-	ChunkSize         int
-	ChunkOverlap      int
-	ChunkerMode       ChunkerMode
-	DryRun            bool
-	SyncSource        bool
+	Root                 string
+	Extensions           []string
+	ExcludeExtensions    []string
+	ExcludeDirs          []string
+	ChunkSize            int
+	ChunkOverlap         int
+	ChunkerMode          ChunkerMode
+	DryRun               bool
+	SyncSource           bool
+	EmbeddingConcurrency int
 }
 
 // IngestResult summarizes an ingest run.
@@ -319,9 +320,10 @@ type IngestResult struct {
 
 // CompactRequest configures vector database compaction.
 type CompactRequest struct {
-	DryRun     bool
-	BatchSize  int
-	KeepBackup bool
+	DryRun               bool
+	BatchSize            int
+	KeepBackup           bool
+	EmbeddingConcurrency int
 }
 
 // CompactResult summarizes a compaction run.

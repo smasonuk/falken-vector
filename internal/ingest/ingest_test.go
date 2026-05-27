@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -447,6 +448,88 @@ func TestRunAllowsZeroChunkOverlap(t *testing.T) {
 	}
 }
 
+func TestRunEmbedsFilesConcurrently(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.md"), "alpha")
+	writeFile(t, filepath.Join(root, "b.md"), "bravo")
+	paths, err := config.ResolvePaths(filepath.Join(root, ".falkengo"))
+	if err != nil {
+		t.Fatalf("ResolvePaths: %v", err)
+	}
+	store := openTestManifest(t, paths.ManifestPath)
+	embedder := newBlockingEmbedder(2)
+	vector := &memoryVectorStore{}
+	type runResult struct {
+		summary Summary
+		err     error
+	}
+	done := make(chan runResult, 1)
+	go func() {
+		summary, err := Run(ctx, store, Options{
+			Root:                 root,
+			Paths:                paths,
+			ChunkSize:            100,
+			ChunkOverlap:         10,
+			Embedder:             embedder,
+			EmbeddingConcurrency: 2,
+			OpenVector: func(context.Context, string, int) (vectorstore.Store, error) {
+				return vector, nil
+			},
+			Now: func() time.Time { return time.Unix(30, 0).UTC() },
+		})
+		done <- runResult{summary: summary, err: err}
+	}()
+
+	select {
+	case <-embedder.ready:
+	case <-time.After(time.Second):
+		close(embedder.release)
+		result := <-done
+		t.Fatalf("embedding calls did not overlap; summary=%+v err=%v", result.summary, result.err)
+	}
+	close(embedder.release)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("Run: %v", result.err)
+	}
+	if result.summary.ChunksEmbedded != 2 || embedder.MaxActive() < 2 {
+		t.Fatalf("summary=%+v maxActive=%d, want two overlapping embeddings", result.summary, embedder.MaxActive())
+	}
+}
+
+func TestRunEmbeddingConcurrencyOneIsSerial(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.md"), "alpha")
+	writeFile(t, filepath.Join(root, "b.md"), "bravo")
+	paths, err := config.ResolvePaths(filepath.Join(root, ".falkengo"))
+	if err != nil {
+		t.Fatalf("ResolvePaths: %v", err)
+	}
+	store := openTestManifest(t, paths.ManifestPath)
+	embedder := &activeCountingEmbedder{delay: 10 * time.Millisecond}
+	vector := &memoryVectorStore{}
+	summary, err := Run(ctx, store, Options{
+		Root:                 root,
+		Paths:                paths,
+		ChunkSize:            100,
+		ChunkOverlap:         10,
+		Embedder:             embedder,
+		EmbeddingConcurrency: 1,
+		OpenVector: func(context.Context, string, int) (vectorstore.Store, error) {
+			return vector, nil
+		},
+		Now: func() time.Time { return time.Unix(31, 0).UTC() },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if summary.ChunksEmbedded != 2 || embedder.MaxActive() != 1 {
+		t.Fatalf("summary=%+v maxActive=%d, want serial embeddings", summary, embedder.MaxActive())
+	}
+}
+
 func TestRunUsesAutoChunkerForMarkdown(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -820,14 +903,107 @@ func hashString(t *testing.T, path string) string {
 }
 
 type fakeEmbedder struct {
+	mu     sync.Mutex
 	calls  int
 	inputs []string
 }
 
 func (e *fakeEmbedder) EmbedText(_ context.Context, input string) (llm.Embedding, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.calls++
 	e.inputs = append(e.inputs, input)
 	return llm.Embedding{Model: "fake", Vector: []float32{float32(len(input)), 1, 0}}, nil
+}
+
+type blockingEmbedder struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	readyAt   int
+	ready     chan struct{}
+	readyOnce sync.Once
+	release   chan struct{}
+}
+
+func newBlockingEmbedder(readyAt int) *blockingEmbedder {
+	return &blockingEmbedder{
+		readyAt: readyAt,
+		ready:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (e *blockingEmbedder) EmbedText(ctx context.Context, input string) (llm.Embedding, error) {
+	e.mu.Lock()
+	e.active++
+	if e.active > e.maxActive {
+		e.maxActive = e.active
+	}
+	if e.active >= e.readyAt {
+		e.readyOnce.Do(func() { close(e.ready) })
+	}
+	e.mu.Unlock()
+
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+		e.decrement()
+		return llm.Embedding{}, ctx.Err()
+	}
+
+	e.decrement()
+	return llm.Embedding{Model: "fake", Vector: []float32{float32(len(input)), 1, 0}}, nil
+}
+
+func (e *blockingEmbedder) decrement() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.active--
+}
+
+func (e *blockingEmbedder) MaxActive() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.maxActive
+}
+
+type activeCountingEmbedder struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	delay     time.Duration
+}
+
+func (e *activeCountingEmbedder) EmbedText(ctx context.Context, input string) (llm.Embedding, error) {
+	e.mu.Lock()
+	e.active++
+	if e.active > e.maxActive {
+		e.maxActive = e.active
+	}
+	e.mu.Unlock()
+
+	select {
+	case <-time.After(e.delay):
+	case <-ctx.Done():
+		e.decrement()
+		return llm.Embedding{}, ctx.Err()
+	}
+
+	e.decrement()
+	return llm.Embedding{Model: "fake", Vector: []float32{float32(len(input)), 1, 0}}, nil
+}
+
+func (e *activeCountingEmbedder) decrement() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.active--
+}
+
+func (e *activeCountingEmbedder) MaxActive() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.maxActive
 }
 
 type failingEmbedder struct{}

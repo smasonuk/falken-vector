@@ -970,10 +970,10 @@ func agentCoverageNudgeOption(policy AgentCoveragePolicy) (*bool, error) {
 func readSourceToolOption(policy ReadSourcePolicy, legacyEnabled bool, question string) (bool, error) {
 	switch policy {
 	case ReadSourcePolicyDefault, ReadSourcePolicyAuto:
-		// if legacyEnabled {
-		return true, nil
-		// }
-		// return agentask.IsBroadQuestion(question), nil
+		if legacyEnabled {
+			return true, nil
+		}
+		return agentask.IsBroadQuestion(question), nil
 	case ReadSourcePolicyOn:
 		return true, nil
 	case ReadSourcePolicyOff:

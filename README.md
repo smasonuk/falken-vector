@@ -68,7 +68,7 @@ If `FALKENGO_LLM_API_KEY` is not set, `ask` uses `FALKENGO_EMBEDDING_MODEL_API_K
 
 ## Development checkout
 
-This branch currently uses sibling local modules for Falken agent support. The expected development checkout is:
+When developing across the Falken modules, the expected local checkout is:
 
 ```text
 falken2/
@@ -78,7 +78,7 @@ falken2/
   falken-vector/
 ```
 
-`falken-vector/go.mod` contains local replacements for `github.com/smasonuk/falken-core` and `github.com/smasonuk/falken-extra`, so `go test ./...` requires those sibling repositories or equivalent module replacements. Prefer keeping local workspace wiring in the parent `go.work` when developing across all three modules.
+`falken-vector/go.mod` uses published module versions for `github.com/smasonuk/falken-core` and `github.com/smasonuk/falken-extra`, so a standalone clone can run `go mod tidy` without sibling repositories. Prefer keeping local workspace wiring in the parent `go.work` when developing across all three modules.
 
 ## Usage
 

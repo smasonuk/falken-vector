@@ -52,6 +52,10 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qq
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
+github.com/smasonuk/falken-core v0.1.0 h1:v9219uVEYpDU+hczCuW25Cn21TnW7sIWJQ8+MpOBvGQ=
+github.com/smasonuk/falken-core v0.1.0/go.mod h1:X44E1IAIBRCDJBWmygBkl/T/9uAQBBRFpoO+GMn+Xxg=
+github.com/smasonuk/falken-extra v0.1.0 h1:Rqop9oqxoNK/HN+0p8Y1ZQ3kLiB+AMSdTCRyauiDRjQ=
+github.com/smasonuk/falken-extra v0.1.0/go.mod h1:Atw95fAkiznZMRFXX8Am5V+LgnrtVgh2Os2lxkB9KkI=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
 github.com/spf13/pflag v1.0.9 h1:9exaQaMOCwffKiiiYk6/BndUBv+iRViNW+4lEMi0PvY=

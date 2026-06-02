@@ -4,8 +4,8 @@ go 1.26.2
 
 require (
 	github.com/hupe1980/vecgo v0.0.15
-	github.com/smasonuk/falken-core v0.0.0
-	github.com/smasonuk/falken-extra v0.0.0
+	github.com/smasonuk/falken-core v0.1.0
+	github.com/smasonuk/falken-extra v0.1.0
 	github.com/spf13/cobra v1.10.2
 	github.com/tmc/langchaingo v0.1.14
 	modernc.org/sqlite v1.50.1

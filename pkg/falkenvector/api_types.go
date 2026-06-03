@@ -26,11 +26,13 @@ type ModelConfig struct {
 
 // EngineConfig configures a public Falken Vector engine.
 //
-// StateDir defaults to the CLI state directory when left empty. Retrieval uses
-// lexical mode by default. Events is optional and nil means no events are
-// delivered. Observability defaults are conservative and do not include raw
-// prompt, embedding input, or retrieved chunk text. AgentLLM is optional for
-// callers that already have a Falken-compatible agent model.
+// StateDir defaults to the CLI state directory when left empty.
+// EngineConfigFromEnvE populates it from FALKENGO_STATE_DIR when set.
+// Retrieval uses lexical mode by default when Mode is empty. Events is optional
+// and nil means no events are delivered. Observability defaults are
+// conservative and do not include raw prompt, embedding input, or retrieved
+// chunk text. AgentLLM is optional for callers that already have a
+// Falken-compatible agent model.
 type EngineConfig struct {
 	StateDir string
 
@@ -53,7 +55,8 @@ type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-// RetrievalMode selects the retrieval backend. Empty defaults to lexical.
+// RetrievalMode selects the public engine retrieval backend. Empty mode values
+// in EngineConfig and request RetrievalOptions default to lexical.
 type RetrievalMode string
 
 const (
@@ -83,7 +86,8 @@ const (
 //
 // TopK defaults to the internal retrieval default. Candidate counts, when zero,
 // are derived from TopK by the retrieval layer. IncludeGlobs, ExcludeGlobs, and
-// SourceRoots narrow the source corpus when provided.
+// SourceRoots narrow the source corpus when provided. Mode defaults to lexical
+// in the public engine; set it explicitly when matching CLI vector defaults.
 type RetrievalOptions struct {
 	Mode              RetrievalMode
 	Reranker          RerankerMode

@@ -2,7 +2,8 @@
 
 `falkengo` is a pure-Go, project-local RAG CLI for indexing text-like files, retrieving relevant chunks, and asking questions over those chunks with an OpenAI-compatible LLM.
 
-It stores all state under `./.falkengo/` in the project you run it from:
+By default, the CLI stores all state under `./.falkengo/` in the project you
+run it from:
 
 - Manifest metadata: `./.falkengo/manifest.sqlite`
 - Vector data: `./.falkengo/vecgo-data`
@@ -66,6 +67,10 @@ export FALKENGO_LLM_HEADERS='{"X-Portkey-Provider":"@openai-aifoundry-swc-001"}'
 
 If `FALKENGO_LLM_API_KEY` is not set, `ask` uses `FALKENGO_EMBEDDING_MODEL_API_KEY` when present.
 
+The CLI state location is controlled with `--state-dir`. The public SDK helper
+`EngineConfigFromEnvE` also reads `FALKENGO_STATE_DIR`, which is useful for SDK
+callers and companion tools that prefer environment-based configuration.
+
 ## Development checkout
 
 When developing across the Falken modules, the expected local checkout is:
@@ -101,15 +106,18 @@ falkengo repair
 falkengo reset
 ```
 
-By default, ingest indexes text-like files discovered by content sniffing. Use `--extensions .md,.go` to restrict indexing to specific file extensions.
+By default, ingest walks regular, non-hidden files outside known generated/state
+directories and indexes files that pass UTF-8/text sniffing. Use
+`--extensions .md,.go` or `--extensions md,go` to restrict indexing to specific
+file extensions; `--exclude-extensions` accepts the same forms.
 
 Use `--state-dir` to choose another project-local state directory, `--timeout` to control command timeouts, and `--verbose` for detailed progress. `ingest` and `compact` do not apply the default timeout because they can run for a long time; pass `--timeout` explicitly to bound those commands.
 
 ## Commands
 
-`falkengo ingest <directory>` scans text-like files, skips unchanged indexed files, chunks changed files, embeds chunks, stores vectors in Vecgo, and stores metadata in SQLite. It prints progress as it scans, embeds, commits the vector database, and updates the manifest; add `--verbose` for per-file skip and error details. Use `--extensions .md,.go` to restrict discovery to specific extensions. Use `--chunker auto|fixed|markdown|text|code` to choose the chunking strategy; `auto` is the default and selects Markdown, prose, or code chunking from the file extension, with unknown text files chunked as plain text. Ingest embeds a contextual indexed form of each chunk that includes short path/heading/symbol metadata, while raw chunk text is still kept for display and prompts. Add `--sync-source` to treat that directory as the source of truth and logically delete previously indexed files from that same source root when they are no longer present on disk.
+`falkengo ingest <directory>` scans text-like files, skips unchanged indexed files, chunks changed files, embeds chunks, stores vectors in Vecgo, and stores metadata in SQLite. It skips the state directory, hidden directories, and common generated/dependency directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, and `target`. Hidden files are skipped unless explicitly allowed by the extension filter, with `.env.example` allowed as a built-in text example. It prints progress as it scans, embeds, commits the vector database, and updates the manifest; add `--verbose` for per-file skip and error details. Use `--extensions .md,.go` to restrict discovery to specific extensions and `--exclude-extensions tmp,log` or `--exclude-dirs fixtures,dist` to remove noisy files. Use `--chunker auto|fixed|markdown|text|code` to choose the chunking strategy; `auto` is the default and selects Markdown, prose, or code chunking from the file extension, with unknown text files chunked as plain text. Ingest embeds a contextual indexed form of each chunk that includes short path/heading/symbol metadata, while raw chunk text is still kept for display and prompts. Use `--embedding-concurrency` to control concurrent embedding requests; the default is `4`. Add `--sync-source` to treat that directory as the source of truth and logically delete previously indexed files from that same source root when they are no longer present on disk.
 
-`falkengo query <question>` retrieves relevant chunks and prints editor-friendly source references like `[source 1] internal/rag/retrieve.go:35-73`. It does not call the LLM unless `--query-planner llm` is explicitly selected. Use `--retrieval vector`, `--retrieval lexical`, or `--retrieval hybrid`; vector remains the default. Lexical mode searches SQLite FTS over paths and contextual indexed text, while hybrid mode fuses vector and lexical ranks. Add `--reranker heuristic` to locally reorder filtered candidates before diversification and final trimming; reranking defaults to `none`. Add `--query-planner heuristic` to expand one question into multiple deterministic retrieval queries, or `--query-planner llm` to use the configured chat client for JSON query planning. Use `--max-subqueries` to cap planned queries and `--show-query-plan` to print them. Use `--include`, `--exclude`, and `--source-root` to restrict sources, `--json` for machine-readable chunks, `--show-retrieval-debug` for retrieval settings, and `--open-source N` to open a retrieved source in `FALKENGO_EDITOR`, `EDITOR`, or `VISUAL`.
+`falkengo query <question>` retrieves relevant chunks and prints editor-friendly source references like `[source 1] internal/rag/retrieve.go:35-73`. It does not call the LLM unless `--query-planner llm` is explicitly selected. Use `--retrieval vector`, `--retrieval lexical`, or `--retrieval hybrid`; vector remains the CLI default. Lexical mode searches SQLite FTS over paths and contextual indexed text, while hybrid mode fuses vector and lexical ranks. Add `--candidate-k`, `--vector-candidate-k`, or `--lexical-candidate-k` to tune retrieval pool sizes before filtering and final trimming. Add `--reranker heuristic` to locally reorder filtered candidates before diversification and final trimming; reranking defaults to `none`. Add `--query-planner heuristic` to expand one question into multiple deterministic retrieval queries, or `--query-planner llm` to use the configured chat client for JSON query planning. Use `--max-subqueries` to cap planned queries and `--show-query-plan` to print them. Use `--include`, `--exclude`, and `--source-root` to restrict sources, `--json` for machine-readable chunks, `--show-retrieval-debug` for retrieval settings, and `--open-source N` to open a retrieved source in `FALKENGO_EDITOR`, `EDITOR`, or `VISUAL`.
 
 `falkengo ask <question>` retrieves chunks, builds a context-only prompt, sends only those chunks to the LLM, prints the answer, and lists editor-friendly sources. It supports the same `--retrieval`, `--reranker`, `--query-planner`, `--include`, `--exclude`, `--source-root`, and `--open-source` controls as `query`. Ask validates model citations such as `[source 1]` by default and retries once with a stricter citation prompt; use `--no-citation-validation` or `--no-citation-retry` to relax that behavior.
 
@@ -181,6 +189,11 @@ Source audit:
 
 `available to agent` is the unique source set registered from tool searches. `cited in answer` is the subset referenced in the final text, and `uncited` is the difference. `search tool calls` counts outer `search_index` calls; `retrieval calls` can be higher because broad search may perform internal expansion retrievals. `introduced by query` counts the first query that introduced each source and appears when provenance is available under `--show-agent-tools`.
 
+When `read_index_source` or `read_index_document` is used, the audit also
+reports read-source overlap decisions and document-read counts, including whole
+document reads, range reads, parent-context reads, automatic promotion reads,
+and too-large skips when applicable.
+
 ### Agent document promotion
 
 `search_index` returns chunks, but it also reports document-level matches so the agent can see when many chunks are evidence from one file. For broad questions, small or dominant files may be promoted automatically: the agent reads the whole registered file and expands the same source number so final citations still point at `[source N]`.
@@ -245,11 +258,67 @@ falkengo ask --agent "citation validation" --retrieval lexical --show-agent-tool
 
 `falkengo reset` deletes `./.falkengo/` after confirmation. Use `--yes` to skip the prompt. For safety, reset refuses to delete a state directory whose basename is not `.falkengo` unless `--force-state-dir` is passed.
 
+## Public SDK
+
+The `pkg/falkenvector` package exposes the same core operations for callers
+that want to embed Falken Vector into another program or UI:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/smasonuk/falken-vector/pkg/falkenvector"
+)
+
+func main() {
+	cfg, err := falkenvector.EngineConfigFromEnvE(os.Getenv)
+	if err != nil {
+		panic(err)
+	}
+	cfg.Retrieval.Mode = falkenvector.RetrievalHybrid
+
+	engine, err := falkenvector.NewEngine(cfg)
+	if err != nil {
+		panic(err)
+	}
+	defer engine.Close()
+
+	answer, err := engine.Ask(context.Background(), falkenvector.AskRequest{
+		Question: "How does retrieval work?",
+		Agent:    true,
+		Retrieval: falkenvector.RetrievalOptions{
+			TopK: 8,
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(answer.Text)
+}
+```
+
+SDK retrieval defaults differ slightly from the CLI: an empty
+`RetrievalOptions.Mode` defaults to lexical mode in the public engine, while the
+CLI `query`, `ask`, and `eval retrieval` commands default to vector mode through
+their flags. Set `Retrieval.Mode` explicitly when you need the two entry points
+to behave identically.
+
+Use `Engine.Ingest`, `Engine.Query`, `Engine.Ask`, `Engine.Status`, and
+`Engine.Compact` for programmatic workflows. `EngineConfig.Events` receives
+structured progress and observability events; raw prompts, model responses,
+embedding inputs, and retrieved text are redacted unless enabled through
+`ObservabilityConfig`.
+
 ## Limitations
 
 - Only text-like files are indexed.
-- Binary files are skipped by extension filtering.
+- Binary files are skipped by content sniffing; extension filters only restrict
+  or exclude which file names are considered.
 - Chunking is structure-aware for Markdown, prose, and common code files, with fixed character windows still available via `--chunker fixed`.
 - Vecgo is wrapped internally so it can be replaced later if needed.
-- The tool stores local state in `./.falkengo`.
+- The CLI stores local state in `./.falkengo` unless `--state-dir` is passed.
 - `--sync-source` performs logical deletion only; old vectors remain in Vecgo until `falkengo compact` rebuilds the vector DB.

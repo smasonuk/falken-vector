@@ -7,12 +7,16 @@ INGEST:
 file → chunks → indexed text → embedding vector → vector DB
                          ↘ metadata/text rows → SQLite manifest
 
-RETRIEVE:
+RETRIEVE (vector):
 question → question vector → vector DB search → chunk IDs
                                       ↘ load chunk text from manifest → ranked results
+
+RETRIEVE (lexical/hybrid):
+question → SQLite FTS and/or vector DB → fused chunk IDs
+                                 ↘ load chunk text from manifest → ranked results
 ```
 
-A key point: the **vector database does not appear to be the main source of truth for text**. The manifest/SQLite side stores documents, raw chunk text, indexed text, line numbers, vector IDs, active/deleted status, and metadata. The vector store interface only exposes `Insert(vector, chunkID)`, `Search(vector, limit)`, and `Commit()`. 
+A key point: the **vector database is not the main source of truth for text**. The manifest/SQLite side stores documents, raw chunk text, indexed text, line numbers, vector IDs, active/deleted status, and metadata. The vector store interface only exposes `Insert(vector, chunkID)`, `Search(vector, limit)`, and `Commit()`.
 
 ## What “indexing” means here
 
@@ -78,7 +82,7 @@ For hybrid retrieval, the code runs vector search and lexical search, then fuses
 
 Vector search only gives candidate chunk IDs. The final step loads those chunk IDs from the manifest, skips inactive chunks, skips non-indexed documents, applies source filters, optionally reranks, optionally diversifies results across documents, trims to `TopK`, and returns `RetrievedChunk` objects containing the chunk text and file path. 
 
-So the retrieval process is:
+So the vector retrieval process is:
 
 ```
 question
@@ -96,8 +100,13 @@ filter/rerank/diversify
 return top chunks
 ```
 
+Lexical retrieval skips the embedding/vector-search steps and starts from the
+SQLite FTS index. Hybrid retrieval runs both candidate paths and fuses them
+before the shared manifest lookup, filtering, reranking, diversification, and
+trimming steps.
+
 ## Summary
 
 A vector database is like a **semantic map**. Each chunk of text becomes a point on that map. Similar chunks land near each other. When the user asks a question, the question is also turned into a point. The vector DB then finds the chunk-points nearest to the question-point.
 
-In this codebase, the vector DB is deliberately small in responsibility: it stores vectors plus a `chunk_id` payload. The richer information lives in SQLite. It vecgo do fast similarity search while SQLite handles document state, chunk text, metadata, active/deleted filtering, and lexical search.
+In this codebase, the vector DB is deliberately small in responsibility: it stores vectors plus a `chunk_id` payload. The richer information lives in SQLite. This lets vecgo do fast similarity search while SQLite handles document state, chunk text, metadata, active/deleted filtering, and lexical search.

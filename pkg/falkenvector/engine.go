@@ -546,6 +546,7 @@ func (e *Engine) askAgent(ctx context.Context, request AskRequest) (Answer, erro
 		Paths:                    e.paths,
 		Store:                    store,
 		RetrievalDefaults:        retrieval,
+		SourceScopeNote:          request.SourceScopeNote,
 		AgentLLM:                 observableFalkenLLM{next: agentLLM, emit: emitter, config: e.config.Observability},
 		EmbedderFactory:          e.observableEmbedderFactory(emitter),
 		RetrieveWithPlan:         e.observableRetrieveWithPlan(emitter),

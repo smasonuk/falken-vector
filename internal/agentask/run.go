@@ -101,7 +101,7 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 
 	agent, err := falken.NewAgent(ctx, falken.AgentConfig{
 		LLM:          opts.AgentLLM,
-		SystemPrompt: agentSystemPrompt(opts.EnableReadSourceTool, !opts.DisableDocumentPromotion),
+		SystemPrompt: agentSystemPrompt(opts.EnableReadSourceTool, !opts.DisableDocumentPromotion, opts.SourceScopeNote),
 		Tools:        agentTools,
 		Events:       events,
 		Permissions: falken.SimplePermissions{

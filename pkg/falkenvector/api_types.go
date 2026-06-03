@@ -157,6 +157,11 @@ type AskRequest struct {
 
 	Retrieval RetrievalOptions
 
+	// SourceScopeNote, when set, is appended to the agent system prompt.
+	// It is intended for caller-enforced source restrictions such as selected
+	// files/directories. AttachedDocuments bypass agent mode and do not use it.
+	SourceScopeNote string
+
 	// AttachedDocuments, when non-empty, bypasses retrieval and agent tools.
 	// The LLM receives exactly these complete documents as context.
 	AttachedDocuments []AttachedDocument

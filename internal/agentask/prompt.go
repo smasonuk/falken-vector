@@ -1,5 +1,7 @@
 package agentask
 
+import "strings"
+
 const AgentSystemPrompt = `You answer questions about the local indexed corpus.
 
 Use search_index before answering questions about indexed documents, code, files, or project facts.
@@ -37,8 +39,11 @@ Use read_index_document for whole-file, parent-section, or large-range document 
 Never invent paths. read_index_document only accepts source_number values returned by search_index.
 For broad questions, after searching, consider whether a dominant small document should be read with read_index_document before finalizing.`
 
-func agentSystemPrompt(enableReadSourceTool bool, enableReadDocumentTool bool) string {
+func agentSystemPrompt(enableReadSourceTool bool, enableReadDocumentTool bool, sourceScopeNote string) string {
 	prompt := AgentSystemPrompt
+	if note := strings.TrimSpace(sourceScopeNote); note != "" {
+		prompt += "\n\n" + note
+	}
 	if enableReadSourceTool {
 		prompt += readSourceToolPrompt
 	}

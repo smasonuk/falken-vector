@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smasonuk/falken-core/pkg/falken"
 	"github.com/smasonuk/falken-vector/internal/agentask"
 	internalconfig "github.com/smasonuk/falken-vector/internal/config"
 	"github.com/smasonuk/falken-vector/internal/manifest"
@@ -411,6 +412,60 @@ func TestEngineAskAttachedDocumentsBypassesRetrievalAndAgentTools(t *testing.T) 
 	}
 }
 
+func TestEngineAskAgentIncludesSourceScopeNote(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateDir := t.TempDir()
+	seedEngineManifest(t, stateDir)
+	llm := &capturingAgentLLM{
+		response: falken.CompletionResponse{
+			AssistantText: "That was not found in the selected sources.",
+			FinishReason:  falken.FinishReasonStop,
+		},
+	}
+	engine, err := NewEngine(EngineConfig{
+		StateDir: stateDir,
+		Retrieval: RetrievalOptions{
+			Mode: RetrievalLexical,
+		},
+		AgentLLM: llm,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	scopeNote := "The user has restricted this ask to selected sources. search_index only searches those selected sources. Treat them as the complete accessible corpus for this answer."
+	answer, err := engine.Ask(context.Background(), AskRequest{
+		Question:        "Where is beta?",
+		Agent:           true,
+		CitationPolicy:  CitationOff,
+		SourceScopeNote: scopeNote,
+		Retrieval: RetrievalOptions{
+			Mode:        RetrievalLexical,
+			SourceRoots: []string{"/repo/docs"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if answer.Text != "That was not found in the selected sources." {
+		t.Fatalf("answer = %+v", answer)
+	}
+	if len(llm.requests) == 0 {
+		t.Fatal("agent LLM received no requests")
+	}
+	system := firstSystemMessage(llm.requests[0])
+	for _, want := range []string{
+		"You answer questions about the local indexed corpus.",
+		"restricted this ask to selected sources",
+		"search_index only searches those selected sources",
+		"complete accessible corpus",
+	} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("system prompt = %q, want substring %q", system, want)
+		}
+	}
+}
+
 func TestAnswerFromRAGSeparatesAvailableAndCitedSources(t *testing.T) {
 	answer := answerFromRAG(rag.AskResult{
 		Answer: "Alpha is documented. [source 2]",
@@ -619,6 +674,29 @@ func (f fakeHTTPClient) Do(*http.Request) (*http.Response, error) {
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(f.body)),
 	}, nil
+}
+
+type capturingAgentLLM struct {
+	requests []falken.CompletionRequest
+	response falken.CompletionResponse
+	err      error
+}
+
+func (f *capturingAgentLLM) Complete(_ context.Context, request falken.CompletionRequest) (falken.CompletionResponse, error) {
+	f.requests = append(f.requests, request)
+	if f.err != nil {
+		return falken.CompletionResponse{}, f.err
+	}
+	return f.response, nil
+}
+
+func firstSystemMessage(request falken.CompletionRequest) string {
+	for _, message := range request.Messages {
+		if message.Role == falken.RoleSystem {
+			return message.Content
+		}
+	}
+	return ""
 }
 
 func captureProcessOutput(t *testing.T, fn func()) (string, string) {

@@ -19,6 +19,10 @@ type Options struct {
 
 	RetrievalDefaults rag.RetrieveOptions
 
+	// SourceScopeNote is appended to the system prompt when callers constrain
+	// search_index to a user-selected subset of sources.
+	SourceScopeNote string
+
 	AgentLLM falken.LLM
 
 	EmbedderFactory func() (llm.Embedder, error)

@@ -6,7 +6,7 @@ import (
 )
 
 func TestAgentSystemPromptDirectsBroadQuestionsToSearchMore(t *testing.T) {
-	prompt := agentSystemPrompt(false, false)
+	prompt := agentSystemPrompt(false, false, "")
 	for _, want := range []string{
 		"broad, exploratory, summary",
 		"at least two materially different queries",
@@ -39,7 +39,7 @@ func TestCorrectiveCitationPromptForbidsGroupedCitations(t *testing.T) {
 }
 
 func TestReadSourcePromptIncludesBroadSummaryThinSpanGuidance(t *testing.T) {
-	prompt := agentSystemPrompt(true, false)
+	prompt := agentSystemPrompt(true, false, "")
 	for _, want := range []string{
 		"read_index_source only accepts source numbers",
 		"For broad summaries",
@@ -58,7 +58,7 @@ func TestReadSourcePromptIncludesBroadSummaryThinSpanGuidance(t *testing.T) {
 }
 
 func TestReadDocumentPromptIncludesDocumentGuidance(t *testing.T) {
-	prompt := agentSystemPrompt(true, true)
+	prompt := agentSystemPrompt(true, true, "")
 	for _, want := range []string{
 		"Use read_index_document when",
 		"summary, overview, audit, timeline, comparison",
@@ -78,5 +78,22 @@ func TestReadDocumentPromptIncludesDocumentGuidance(t *testing.T) {
 	}
 	if strings.Contains(prompt, "path argument") {
 		t.Fatalf("prompt = %q, should not suggest raw path arguments", prompt)
+	}
+}
+
+func TestAgentSystemPromptIncludesSourceScopeNote(t *testing.T) {
+	note := "The user has restricted this ask to selected sources. search_index only searches those selected sources. Treat them as the complete accessible corpus for this answer."
+	prompt := agentSystemPrompt(false, false, " \n"+note+"\n ")
+	for _, want := range []string{
+		"restricted this ask to selected sources",
+		"search_index only searches those selected sources",
+		"complete accessible corpus",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want substring %q", prompt, want)
+		}
+	}
+	if strings.Contains(prompt, "\n "+note) || strings.Contains(prompt, note+"\n ") {
+		t.Fatalf("prompt = %q, want trimmed scope note", prompt)
 	}
 }

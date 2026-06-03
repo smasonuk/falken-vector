@@ -157,6 +157,10 @@ type AskRequest struct {
 
 	Retrieval RetrievalOptions
 
+	// AttachedDocuments, when non-empty, bypasses retrieval and agent tools.
+	// The LLM receives exactly these complete documents as context.
+	AttachedDocuments []AttachedDocument
+
 	Agent bool
 
 	CitationPolicy CitationPolicy
@@ -180,6 +184,15 @@ type AskRequest struct {
 	// MaxMergedReadSourceLines caps merged read_index_source ranges.
 	// Zero uses the agent default.
 	MaxMergedReadSourceLines int
+}
+
+// AttachedDocument supplies a complete document as Ask context.
+type AttachedDocument struct {
+	Path       string
+	SourceRoot string
+	Text       string
+	StartLine  int
+	EndLine    int
 }
 
 // Answer is the structured answer returned by Ask.
@@ -278,6 +291,14 @@ type StatusDocumentCounts struct {
 type StatusChunkCounts struct {
 	Active   int
 	Inactive int
+}
+
+// IndexedDocument describes one active indexed document in the manifest.
+type IndexedDocument struct {
+	ID         string
+	Path       string
+	SourceRoot string
+	SizeBytes  int64
 }
 
 // ChunkerMode selects the ingest chunking strategy. Empty defaults to

@@ -15,6 +15,14 @@ type AskOptions struct {
 	CitationPolicy CitationPolicy
 }
 
+type AskSourceOptions struct {
+	Question       string
+	Model          string
+	Sources        []SourceChunk
+	LLM            llm.Client
+	CitationPolicy CitationPolicy
+}
+
 type AskResult struct {
 	Answer           string
 	Sources          []SourceChunk
@@ -24,11 +32,20 @@ type AskResult struct {
 }
 
 func Ask(ctx context.Context, opts AskOptions) (AskResult, error) {
+	return AskWithSources(ctx, AskSourceOptions{
+		Question:       opts.Question,
+		Model:          opts.Model,
+		Sources:        SourceChunksFromRetrieved(opts.Chunks),
+		LLM:            opts.LLM,
+		CitationPolicy: opts.CitationPolicy,
+	})
+}
+
+func AskWithSources(ctx context.Context, opts AskSourceOptions) (AskResult, error) {
 	if opts.LLM == nil {
 		return AskResult{}, errors.New("llm client is required")
 	}
-	sources := SourceChunksFromRetrieved(opts.Chunks)
-	prompt, err := BuildPrompt(opts.Question, sources)
+	prompt, err := BuildPrompt(opts.Question, opts.Sources)
 	if err != nil {
 		return AskResult{}, err
 	}

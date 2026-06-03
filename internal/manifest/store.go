@@ -277,6 +277,35 @@ func (s *SQLiteStore) ListIndexedDocumentsUnderRoot(ctx context.Context, sourceR
 	return docs, nil
 }
 
+func (s *SQLiteStore) ListIndexedDocuments(ctx context.Context) ([]Document, error) {
+	selectSQL, err := s.documentSelectSQL(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sourceRootExpr, err := s.selectColumnExpr(ctx, "documents", "", "source_root", "''")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, selectSQL+` where status = ? order by `+sourceRootExpr+`, path`, DocumentStatusIndexed)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	docs := make([]Document, 0)
+	for rows.Next() {
+		doc, err := scanDocument(rows)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, *doc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
 func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, documentID string, deletedAt time.Time) error {
 	return s.MarkDocumentsDeleted(ctx, []string{documentID}, deletedAt)
 }

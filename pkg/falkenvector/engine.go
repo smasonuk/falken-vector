@@ -124,6 +124,9 @@ func (e *Engine) Query(ctx context.Context, request QueryRequest) (QueryResult, 
 // Ask answers a question without printing. Agent mode uses Falken Core tools;
 // non-agent mode retrieves chunks first and sends them to the chat model.
 func (e *Engine) Ask(ctx context.Context, request AskRequest) (Answer, error) {
+	if len(request.AttachedDocuments) != 0 {
+		return e.askAttached(ctx, request)
+	}
 	if request.Agent {
 		return e.askAgent(ctx, request)
 	}
@@ -165,6 +168,38 @@ func (e *Engine) Status(ctx context.Context) (Status, error) {
 		},
 		LastIndexedAt: stats.LastIndexedAt,
 	}, nil
+}
+
+// ListIndexedDocuments returns active indexed documents from the manifest.
+func (e *Engine) ListIndexedDocuments(ctx context.Context) ([]IndexedDocument, error) {
+	if err := e.checkReady(); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(e.paths.ManifestPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, rag.ErrNoIndex
+		}
+		return nil, err
+	}
+	store, err := manifest.Open(e.paths.ManifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("open manifest database: %w", err)
+	}
+	defer store.Close()
+	docs, err := store.ListIndexedDocuments(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list indexed documents: %w", err)
+	}
+	out := make([]IndexedDocument, 0, len(docs))
+	for _, doc := range docs {
+		out = append(out, IndexedDocument{
+			ID:         doc.ID,
+			Path:       doc.Path,
+			SourceRoot: doc.SourceRoot,
+			SizeBytes:  doc.SizeBytes,
+		})
+	}
+	return out, nil
 }
 
 // Ingest indexes text files from a source directory without printing.
@@ -415,6 +450,40 @@ func (e *Engine) askRAG(ctx context.Context, request AskRequest) (Answer, error)
 		Answer: answerEvent(answer, e.config.Observability),
 	})
 	_ = result
+	return answer, nil
+}
+
+func (e *Engine) askAttached(ctx context.Context, request AskRequest) (Answer, error) {
+	if strings.TrimSpace(request.Question) == "" {
+		return Answer{}, errors.New("question is required")
+	}
+	if err := e.checkReady(); err != nil {
+		return Answer{}, err
+	}
+	emitter := newEventEmitter(e.eventSink())
+	emitter.emit(Event{Type: EventRunStarted, Message: "ask.attached"})
+	client, err := e.newChatClient()
+	if err != nil {
+		err = fmt.Errorf("configure LLM client: %w", err)
+		emitter.emitError(EventRunFailed, err)
+		return Answer{}, err
+	}
+	askResult, err := rag.AskWithSources(ctx, rag.AskSourceOptions{
+		Question:       request.Question,
+		Model:          e.config.Chat.Model,
+		Sources:        attachedDocumentSources(request.AttachedDocuments),
+		LLM:            observableInternalLLM{next: client, emit: emitter, config: e.config.Observability, label: "answer"},
+		CitationPolicy: toRAGCitationPolicy(request.CitationPolicy),
+	})
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return Answer{}, err
+	}
+	answer := answerFromRAG(askResult)
+	emitter.emit(Event{
+		Type:   EventRunCompleted,
+		Answer: answerEvent(answer, e.config.Observability),
+	})
 	return answer, nil
 }
 
@@ -1115,6 +1184,46 @@ func publicSources(sources []rag.SourceChunk) []Source {
 		})
 	}
 	return out
+}
+
+func attachedDocumentSources(documents []AttachedDocument) []rag.SourceChunk {
+	out := make([]rag.SourceChunk, 0, len(documents))
+	for _, document := range documents {
+		startLine := document.StartLine
+		if startLine <= 0 {
+			startLine = 1
+		}
+		endLine := document.EndLine
+		if endLine <= 0 {
+			lineCount := attachedDocumentLineCount(document.Text)
+			if lineCount <= 0 {
+				lineCount = 1
+			}
+			endLine = startLine + lineCount - 1
+		}
+		if endLine < startLine {
+			endLine = startLine
+		}
+		out = append(out, rag.SourceChunk{
+			Path:       document.Path,
+			SourceRoot: document.SourceRoot,
+			StartLine:  startLine,
+			EndLine:    endLine,
+			Text:       document.Text,
+		})
+	}
+	return out
+}
+
+func attachedDocumentLineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	lines := strings.Count(text, "\n")
+	if !strings.HasSuffix(text, "\n") {
+		lines++
+	}
+	return lines
 }
 
 func citedSourceChunks(answer string, sources []rag.SourceChunk) []rag.SourceChunk {

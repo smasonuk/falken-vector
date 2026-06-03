@@ -301,6 +301,26 @@ func TestEngineQueryLexicalReturnsChunksAndEvents(t *testing.T) {
 	}
 }
 
+func TestEngineListIndexedDocuments(t *testing.T) {
+	stateDir := t.TempDir()
+	seedEngineManifest(t, stateDir)
+	engine, err := NewEngine(EngineConfig{StateDir: stateDir})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	docs, err := engine.ListIndexedDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("ListIndexedDocuments: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("docs = %+v, want one", docs)
+	}
+	if docs[0].Path != "/repo/docs/alpha.md" || docs[0].SourceRoot != "/repo" || docs[0].SizeBytes != 42 {
+		t.Fatalf("doc = %+v", docs[0])
+	}
+}
+
 func TestEngineAskRAGReturnsAnswerAndEventOrder(t *testing.T) {
 	stateDir := t.TempDir()
 	seedEngineManifest(t, stateDir)
@@ -336,6 +356,52 @@ func TestEngineAskRAGReturnsAnswerAndEventOrder(t *testing.T) {
 		EventRunStarted,
 		EventRetrievalStarted,
 		EventRetrievalCompleted,
+		EventLLMRequest,
+		EventLLMResponse,
+		EventRunCompleted,
+	}
+	if got := eventTypes(events); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+func TestEngineAskAttachedDocumentsBypassesRetrievalAndAgentTools(t *testing.T) {
+	var events []Event
+	engine, err := NewEngine(EngineConfig{
+		StateDir: t.TempDir(),
+		Chat: ModelConfig{
+			APIKey:  "chat-key",
+			BaseURL: "https://chat.test/v1",
+			Model:   "chat-model",
+		},
+		HTTPClient: fakeHTTPClient{body: `{"model":"chat-model","choices":[{"message":{"role":"assistant","content":"Beta is in the attached document. [source 2]"}}]}`},
+		Events: func(event Event) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	answer, err := engine.Ask(context.Background(), AskRequest{
+		Question: "Where is beta?",
+		Agent:    true,
+		AttachedDocuments: []AttachedDocument{
+			{Path: "/repo/a.md", SourceRoot: "/repo", Text: "Alpha\n", StartLine: 1, EndLine: 1},
+			{Path: "/repo/b.md", SourceRoot: "/repo", Text: "Beta\nGamma\n"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if answer.Text != "Beta is in the attached document. [source 2]" || len(answer.Sources) != 2 || !answer.CitationValid {
+		t.Fatalf("answer = %+v", answer)
+	}
+	if answer.Sources[1].Path != "/repo/b.md" || answer.Sources[1].StartLine != 1 || answer.Sources[1].EndLine != 2 {
+		t.Fatalf("source = %+v", answer.Sources[1])
+	}
+	want := []EventType{
+		EventRunStarted,
 		EventLLMRequest,
 		EventLLMResponse,
 		EventRunCompleted,
@@ -520,6 +586,7 @@ func seedEngineManifest(t *testing.T, stateDir string) {
 		SizeBytes:   42,
 		ModifiedAt:  now,
 		IndexedAt:   &now,
+		SourceRoot:  "/repo",
 		Status:      manifest.DocumentStatusIndexed,
 	}, []manifest.Chunk{{
 		ID:             chunkID,

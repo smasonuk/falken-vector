@@ -205,7 +205,7 @@ func TestAskAgentOpenSourceOutOfRangeReportsAvailableSources(t *testing.T) {
 	}
 }
 
-func TestAskAgentShowToolsAndWarnings(t *testing.T) {
+func TestAskAgentShowToolsFormatsCallsAndResults(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
 	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
 		if opts.Events == nil {
@@ -229,42 +229,8 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 				"warnings": ["top_k raised to configured floor 12"]
 			}`),
 		}})
-		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
-			CallID: "call-2",
-			Name:   "search_index",
-			Payload: json.RawMessage(`{
-				"success": true,
-				"status": "ok",
-				"query": "hello again",
-				"top_k": 8,
-				"sources": [],
-				"warnings": ["top_k raised to configured floor 12", "different warning"]
-			}`),
-		}})
-		opts.Events(falken.Event{Type: falken.EventThought, Text: "agent thin-source nudge: expanding [source 1]"})
-		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
-			ID:        "call-read",
-			Name:      "read_index_source",
-			Arguments: json.RawMessage(`{"source_number":1,"context_lines":20}`),
-		}})
-		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
-			CallID: "call-read",
-			Name:   "read_index_source",
-			Payload: json.RawMessage(`{
-				"success": true,
-				"status": "ok",
-				"source_number": 1,
-				"path": "alphafold.md",
-				"start_line": 1,
-				"end_line": 20
-			}`),
-		}})
 		return agentask.Result{
-			Answer:             "agent answer",
-			ToolCalls:          []string{"search_index"},
-			CitationWarnings:   []string{"answer did not cite any source"},
-			CoverageWarnings:   []string{"coverage nudge skipped: search call limit reached"},
-			ThinSourceWarnings: []string{"thin-source nudge: expanding [source 1]"},
+			Answer: "agent answer",
 		}
 	})
 	defer restore()
@@ -286,6 +252,100 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 	if strings.Contains(stderr, "hidden source text") {
 		t.Fatalf("stderr = %q, leaked source text", stderr)
 	}
+	if strings.Count(stderr, "agent tool call: search_index") != 1 {
+		t.Fatalf("stderr = %q, want one live tool call line", stderr)
+	}
+}
+
+func TestAskAgentShowToolsDeduplicatesWarnings(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.Events == nil {
+			t.Fatal("Events sink was not configured")
+		}
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-1",
+			Name:   "search_index",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"warnings": ["top_k raised to configured floor 12"]
+			}`),
+		}})
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-2",
+			Name:   "search_index",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"status": "ok",
+				"query": "hello again",
+				"top_k": 8,
+				"sources": [],
+				"warnings": ["top_k raised to configured floor 12", "different warning"]
+			}`),
+		}})
+		return agentask.Result{
+			Answer: "agent answer",
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var errOut bytes.Buffer
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--show-agent-tools"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	stderr := errOut.String()
+	if strings.Count(stderr, "top_k raised to configured floor 12") != 1 {
+		t.Fatalf("stderr = %q, want duplicate warning suppressed", stderr)
+	}
+	if !strings.Contains(stderr, "different warning") {
+		t.Fatalf("stderr = %q, want distinct warning printed", stderr)
+	}
+}
+
+func TestAskAgentShowToolsDisplaysNudgesAndWarnings(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		if opts.Events == nil {
+			t.Fatal("Events sink was not configured")
+		}
+		opts.Events(falken.Event{Type: falken.EventThought, Text: "agent thin-source nudge: expanding [source 1]"})
+		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+			ID:        "call-read",
+			Name:      "read_index_source",
+			Arguments: json.RawMessage(`{"source_number":1,"context_lines":20}`),
+		}})
+		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+			CallID: "call-read",
+			Name:   "read_index_source",
+			Payload: json.RawMessage(`{
+				"success": true,
+				"status": "ok",
+				"source_number": 1,
+				"path": "alphafold.md",
+				"start_line": 1,
+				"end_line": 20
+			}`),
+		}})
+		return agentask.Result{
+			Answer:             "agent answer",
+			CitationWarnings:   []string{"answer did not cite any source"},
+			CoverageWarnings:   []string{"coverage nudge skipped: search call limit reached"},
+			ThinSourceWarnings: []string{"thin-source nudge: expanding [source 1]"},
+		}
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var errOut bytes.Buffer
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "hello", "--agent", "--retrieval", "lexical", "--show-agent-tools"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	stderr := errOut.String()
 	if !strings.Contains(stderr, "agent coverage nudge skipped: search call limit reached") {
 		t.Fatalf("stderr = %q, want coverage warning in debug output", stderr)
 	}
@@ -302,15 +362,6 @@ func TestAskAgentShowToolsAndWarnings(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "warning: answer did not cite any source") {
 		t.Fatalf("stderr = %q, want warning", stderr)
-	}
-	if strings.Count(stderr, "agent tool call: search_index") != 1 {
-		t.Fatalf("stderr = %q, want one live tool call line", stderr)
-	}
-	if strings.Count(stderr, "top_k raised to configured floor 12") != 1 {
-		t.Fatalf("stderr = %q, want duplicate warning suppressed", stderr)
-	}
-	if !strings.Contains(stderr, "different warning") {
-		t.Fatalf("stderr = %q, want distinct warning printed", stderr)
 	}
 }
 

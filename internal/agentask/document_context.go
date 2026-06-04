@@ -12,6 +12,19 @@ import (
 
 const ReadIndexDocumentToolName = "read_index_document"
 
+const (
+	DefaultMaxDocumentReadLines   = 500
+	DefaultMaxDocumentReadTokens  = 25000
+	DefaultMaxDocumentReads       = 2
+	DefaultSmallFileLineLimit     = 400
+	DefaultSmallFileTokenLimit    = 25000
+	DefaultDominantDocShare       = 0.45
+	DefaultMinHitsForDominantDoc  = 4
+	DefaultMinHitsForSmallFile    = 2
+	DefaultMaxTotalDocumentTokens = 40000
+	DefaultScatteredHitThreshold  = 3
+)
+
 type Range struct {
 	StartLine int `json:"start_line"`
 	EndLine   int `json:"end_line"`
@@ -77,49 +90,49 @@ type DocumentPromotionDecision struct {
 func defaultDocumentPromotionOptions() DocumentPromotionOptions {
 	return DocumentPromotionOptions{
 		Enabled:                true,
-		MaxDocumentReadLines:   500,
-		MaxDocumentReadTokens:  25000,
-		MaxDocumentReads:       2,
-		SmallFileLineLimit:     400,
-		SmallFileTokenLimit:    25000,
-		DominantDocShare:       0.45,
-		MinHitsForDominantDoc:  4,
-		MinHitsForSmallFile:    2,
-		MaxTotalDocumentTokens: 40000,
-		ScatteredHitThreshold:  3,
+		MaxDocumentReadLines:   DefaultMaxDocumentReadLines,
+		MaxDocumentReadTokens:  DefaultMaxDocumentReadTokens,
+		MaxDocumentReads:       DefaultMaxDocumentReads,
+		SmallFileLineLimit:     DefaultSmallFileLineLimit,
+		SmallFileTokenLimit:    DefaultSmallFileTokenLimit,
+		DominantDocShare:       DefaultDominantDocShare,
+		MinHitsForDominantDoc:  DefaultMinHitsForDominantDoc,
+		MinHitsForSmallFile:    DefaultMinHitsForSmallFile,
+		MaxTotalDocumentTokens: DefaultMaxTotalDocumentTokens,
+		ScatteredHitThreshold:  DefaultScatteredHitThreshold,
 	}
 }
 
 func normalizeDocumentPromotionOptions(opts DocumentPromotionOptions) DocumentPromotionOptions {
 	if opts.MaxDocumentReadLines <= 0 {
-		opts.MaxDocumentReadLines = 500
+		opts.MaxDocumentReadLines = DefaultMaxDocumentReadLines
 	}
 	if opts.MaxDocumentReadTokens <= 0 {
-		opts.MaxDocumentReadTokens = 25000
+		opts.MaxDocumentReadTokens = DefaultMaxDocumentReadTokens
 	}
 	if opts.MaxDocumentReads <= 0 {
-		opts.MaxDocumentReads = 2
+		opts.MaxDocumentReads = DefaultMaxDocumentReads
 	}
 	if opts.SmallFileLineLimit <= 0 {
-		opts.SmallFileLineLimit = 400
+		opts.SmallFileLineLimit = DefaultSmallFileLineLimit
 	}
 	if opts.SmallFileTokenLimit <= 0 {
-		opts.SmallFileTokenLimit = 25000
+		opts.SmallFileTokenLimit = DefaultSmallFileTokenLimit
 	}
 	if opts.DominantDocShare <= 0 {
-		opts.DominantDocShare = 0.45
+		opts.DominantDocShare = DefaultDominantDocShare
 	}
 	if opts.MinHitsForDominantDoc <= 0 {
-		opts.MinHitsForDominantDoc = 4
+		opts.MinHitsForDominantDoc = DefaultMinHitsForDominantDoc
 	}
 	if opts.MinHitsForSmallFile <= 0 {
-		opts.MinHitsForSmallFile = 2
+		opts.MinHitsForSmallFile = DefaultMinHitsForSmallFile
 	}
 	if opts.MaxTotalDocumentTokens <= 0 {
-		opts.MaxTotalDocumentTokens = 40000
+		opts.MaxTotalDocumentTokens = DefaultMaxTotalDocumentTokens
 	}
 	if opts.ScatteredHitThreshold <= 0 {
-		opts.ScatteredHitThreshold = 3
+		opts.ScatteredHitThreshold = DefaultScatteredHitThreshold
 	}
 	return opts
 }

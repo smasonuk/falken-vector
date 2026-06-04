@@ -235,7 +235,11 @@ func groupTermsForQueries(b suggestionBuckets) [][]string {
 }
 
 func preferredTerms(preferred []string, sources ...[]string) []string {
-	all := make([]string, 0)
+	capacity := 0
+	for _, values := range sources {
+		capacity += len(values)
+	}
+	all := make([]string, 0, capacity)
 	for _, values := range sources {
 		all = append(all, values...)
 	}

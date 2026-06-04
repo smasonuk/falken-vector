@@ -77,11 +77,11 @@ type DocumentPromotionDecision struct {
 func defaultDocumentPromotionOptions() DocumentPromotionOptions {
 	return DocumentPromotionOptions{
 		Enabled:                true,
-		MaxDocumentReadLines:   500,
-		MaxDocumentReadTokens:  25000,
+		MaxDocumentReadLines:   DefaultMaxDocumentReadLines,
+		MaxDocumentReadTokens:  DefaultMaxDocumentReadTokens,
 		MaxDocumentReads:       2,
 		SmallFileLineLimit:     400,
-		SmallFileTokenLimit:    25000,
+		SmallFileTokenLimit:    DefaultSmallFileTokenLimit,
 		DominantDocShare:       0.45,
 		MinHitsForDominantDoc:  4,
 		MinHitsForSmallFile:    2,
@@ -92,10 +92,10 @@ func defaultDocumentPromotionOptions() DocumentPromotionOptions {
 
 func normalizeDocumentPromotionOptions(opts DocumentPromotionOptions) DocumentPromotionOptions {
 	if opts.MaxDocumentReadLines <= 0 {
-		opts.MaxDocumentReadLines = 500
+		opts.MaxDocumentReadLines = DefaultMaxDocumentReadLines
 	}
 	if opts.MaxDocumentReadTokens <= 0 {
-		opts.MaxDocumentReadTokens = 25000
+		opts.MaxDocumentReadTokens = DefaultMaxDocumentReadTokens
 	}
 	if opts.MaxDocumentReads <= 0 {
 		opts.MaxDocumentReads = 2
@@ -104,7 +104,7 @@ func normalizeDocumentPromotionOptions(opts DocumentPromotionOptions) DocumentPr
 		opts.SmallFileLineLimit = 400
 	}
 	if opts.SmallFileTokenLimit <= 0 {
-		opts.SmallFileTokenLimit = 25000
+		opts.SmallFileTokenLimit = DefaultSmallFileTokenLimit
 	}
 	if opts.DominantDocShare <= 0 {
 		opts.DominantDocShare = 0.45

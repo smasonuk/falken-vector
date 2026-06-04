@@ -404,48 +404,74 @@ values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	return tx.Commit()
 }
 
+func getPendingDocuments(ctx context.Context, q queryer, runID string, docSQL string) ([]Document, error) {
+	rows, err := q.QueryContext(ctx, docSQL+` where run_id = ? order by path`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var docs []Document
+	for rows.Next() {
+		var doc Document
+		var modifiedAt string
+		var indexedAt string
+		if err := rows.Scan(&doc.ID, &doc.Path, &doc.ContentHash, &doc.SizeBytes, &modifiedAt, &indexedAt, &doc.SourceRoot, &doc.Chunker, &doc.ChunkSize, &doc.ChunkOverlap, &doc.IndexTextVersion); err != nil {
+			return nil, err
+		}
+		t, err := parseTime(modifiedAt)
+		if err != nil {
+			return nil, err
+		}
+		doc.ModifiedAt = t
+		indexed, err := parseTime(indexedAt)
+		if err != nil {
+			return nil, err
+		}
+		doc.IndexedAt = &indexed
+		doc.Status = DocumentStatusIndexed
+		docs = append(docs, doc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
+func activatePendingDocument(ctx context.Context, q queryer, runID string, doc Document, chunkSQL string) error {
+	if err := upsertDocument(ctx, q, doc); err != nil {
+		return err
+	}
+	if _, err := q.ExecContext(ctx, `update chunks set active = 0 where document_id = ?`, doc.ID); err != nil {
+		return err
+	}
+	if err := deleteFTSForDocument(ctx, q, doc.ID); err != nil {
+		return err
+	}
+	chunkRows, err := q.QueryContext(ctx, chunkSQL+` where run_id = ? and document_id = ? order by chunk_index`, runID, doc.ID)
+	if err != nil {
+		return err
+	}
+	defer chunkRows.Close()
+
+	for chunkRows.Next() {
+		chunk, err := scanChunk(chunkRows)
+		if err != nil {
+			return err
+		}
+		if err := insertChunk(ctx, q, *chunk); err != nil {
+			return err
+		}
+	}
+	return chunkRows.Err()
+}
+
 func (s *SQLiteStore) ActivatePendingRun(ctx context.Context, runID string) error {
-	sourceRootExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "source_root", "''")
+	docSelectSQL, err := s.pendingDocumentSelectSQL(ctx)
 	if err != nil {
 		return err
 	}
-	chunkerExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "chunker", "''")
-	if err != nil {
-		return err
-	}
-	chunkSizeExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "chunk_size", "0")
-	if err != nil {
-		return err
-	}
-	chunkOverlapExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "chunk_overlap", "0")
-	if err != nil {
-		return err
-	}
-	indexTextVersionExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "index_text_version", "0")
-	if err != nil {
-		return err
-	}
-	pendingIndexedTextExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "indexed_text", "''")
-	if err != nil {
-		return err
-	}
-	pendingChunkerExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "chunker", "''")
-	if err != nil {
-		return err
-	}
-	pendingLanguageExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "language", "''")
-	if err != nil {
-		return err
-	}
-	pendingHeadingPathExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "heading_path", "''")
-	if err != nil {
-		return err
-	}
-	pendingSymbolNameExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "symbol_name", "''")
-	if err != nil {
-		return err
-	}
-	pendingSymbolKindExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "symbol_kind", "''")
+	chunkSelectSQL, err := s.pendingChunkSelectSQL(ctx)
 	if err != nil {
 		return err
 	}
@@ -456,78 +482,17 @@ func (s *SQLiteStore) ActivatePendingRun(ctx context.Context, runID string) erro
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.QueryContext(ctx, `select document_id, path, content_hash, size_bytes, modified_at, indexed_at, `+sourceRootExpr+`, `+chunkerExpr+`, `+chunkSizeExpr+`, `+chunkOverlapExpr+`, `+indexTextVersionExpr+` from pending_documents where run_id = ? order by path`, runID)
+	docs, err := getPendingDocuments(ctx, tx, runID, docSelectSQL)
 	if err != nil {
-		return err
-	}
-	var docs []Document
-	for rows.Next() {
-		var doc Document
-		var modifiedAt string
-		var indexedAt string
-		if err := rows.Scan(&doc.ID, &doc.Path, &doc.ContentHash, &doc.SizeBytes, &modifiedAt, &indexedAt, &doc.SourceRoot, &doc.Chunker, &doc.ChunkSize, &doc.ChunkOverlap, &doc.IndexTextVersion); err != nil {
-			rows.Close()
-			return err
-		}
-		t, err := parseTime(modifiedAt)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		doc.ModifiedAt = t
-		indexed, err := parseTime(indexedAt)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		doc.IndexedAt = &indexed
-		doc.Status = DocumentStatusIndexed
-		docs = append(docs, doc)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 
 	for _, doc := range docs {
-		if err := upsertDocument(ctx, tx, doc); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `update chunks set active = 0 where document_id = ?`, doc.ID); err != nil {
-			return err
-		}
-		if err := deleteFTSForDocument(ctx, tx, doc.ID); err != nil {
-			return err
-		}
-		chunkRows, err := tx.QueryContext(ctx, `
-select id, document_id, chunk_index, content_hash, chunk_text, `+pendingIndexedTextExpr+`, start_line, end_line, vector_id, embedding_model, 1, created_at, `+pendingChunkerExpr+`, `+pendingLanguageExpr+`, `+pendingHeadingPathExpr+`, `+pendingSymbolNameExpr+`, `+pendingSymbolKindExpr+`
-from pending_chunks
-where run_id = ? and document_id = ?
-order by chunk_index
-`, runID, doc.ID)
-		if err != nil {
-			return err
-		}
-		for chunkRows.Next() {
-			chunk, err := scanChunk(chunkRows)
-			if err != nil {
-				chunkRows.Close()
-				return err
-			}
-			if err := insertChunk(ctx, tx, *chunk); err != nil {
-				chunkRows.Close()
-				return err
-			}
-		}
-		if err := chunkRows.Close(); err != nil {
-			return err
-		}
-		if err := chunkRows.Err(); err != nil {
+		if err := activatePendingDocument(ctx, tx, runID, doc, chunkSelectSQL); err != nil {
 			return err
 		}
 	}
+
 	if _, err := tx.ExecContext(ctx, `delete from pending_documents where run_id = ?`, runID); err != nil {
 		return err
 	}
@@ -791,6 +756,7 @@ type rowScanner interface {
 
 type queryer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
@@ -820,6 +786,58 @@ func (s *SQLiteStore) documentSelectSQL(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return `select id, path, content_hash, size_bytes, modified_at, indexed_at, ` + deletedAt + `, ` + sourceRoot + `, ` + chunker + `, ` + chunkSize + `, ` + chunkOverlap + `, ` + indexTextVersion + `, status, error from documents`, nil
+}
+
+func (s *SQLiteStore) pendingDocumentSelectSQL(ctx context.Context) (string, error) {
+	sourceRootExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "source_root", "''")
+	if err != nil {
+		return "", err
+	}
+	chunkerExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "chunker", "''")
+	if err != nil {
+		return "", err
+	}
+	chunkSizeExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "chunk_size", "0")
+	if err != nil {
+		return "", err
+	}
+	chunkOverlapExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "chunk_overlap", "0")
+	if err != nil {
+		return "", err
+	}
+	indexTextVersionExpr, err := s.selectColumnExpr(ctx, "pending_documents", "", "index_text_version", "0")
+	if err != nil {
+		return "", err
+	}
+	return `select document_id, path, content_hash, size_bytes, modified_at, indexed_at, ` + sourceRootExpr + `, ` + chunkerExpr + `, ` + chunkSizeExpr + `, ` + chunkOverlapExpr + `, ` + indexTextVersionExpr + ` from pending_documents`, nil
+}
+
+func (s *SQLiteStore) pendingChunkSelectSQL(ctx context.Context) (string, error) {
+	pendingIndexedTextExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "indexed_text", "''")
+	if err != nil {
+		return "", err
+	}
+	pendingChunkerExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "chunker", "''")
+	if err != nil {
+		return "", err
+	}
+	pendingLanguageExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "language", "''")
+	if err != nil {
+		return "", err
+	}
+	pendingHeadingPathExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "heading_path", "''")
+	if err != nil {
+		return "", err
+	}
+	pendingSymbolNameExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "symbol_name", "''")
+	if err != nil {
+		return "", err
+	}
+	pendingSymbolKindExpr, err := s.selectColumnExpr(ctx, "pending_chunks", "", "symbol_kind", "''")
+	if err != nil {
+		return "", err
+	}
+	return `select id, document_id, chunk_index, content_hash, chunk_text, ` + pendingIndexedTextExpr + `, start_line, end_line, vector_id, embedding_model, 1, created_at, ` + pendingChunkerExpr + `, ` + pendingLanguageExpr + `, ` + pendingHeadingPathExpr + `, ` + pendingSymbolNameExpr + `, ` + pendingSymbolKindExpr + ` from pending_chunks`, nil
 }
 
 func (s *SQLiteStore) chunkSelectSQL(ctx context.Context, alias string) (string, error) {

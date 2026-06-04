@@ -19,16 +19,19 @@ func WriteText(w io.Writer, datasetPath string, summary Summary, details bool) e
 	if _, err := fmt.Fprintf(w, "dataset: %s\n", datasetPath); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "top-k: %d\n", summary.TopK); err != nil {
+	if err := writeCountMetric(w, "top-k", summary.TopK); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "cases: %d\n", summary.Cases); err != nil {
+	if err := writeCountMetric(w, "cases", summary.Cases); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "evaluated: %d\n", summary.EvaluatedCases); err != nil {
+	if err := writeCountMetric(w, "evaluated", summary.EvaluatedCases); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "failed: %d\n\n", summary.FailedCases); err != nil {
+	if err := writeCountMetric(w, "failed", summary.FailedCases); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "hit@%d:       %.4f\n", summary.TopK, summary.HitAtK); err != nil {
@@ -57,6 +60,13 @@ func WriteJSON(w io.Writer, summary Summary) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(summary)
+}
+
+func writeCountMetric(w io.Writer, name string, value int) error {
+	if _, err := fmt.Fprintf(w, "%s: %d\n", name, value); err != nil {
+		return err
+	}
+	return nil
 }
 
 func writeCaseDetails(w io.Writer, result CaseResult) error {

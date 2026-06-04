@@ -37,172 +37,196 @@ const (
 	ReadSourceOverlapAllow   ReadSourceOverlapPolicy = "allow"
 )
 
+type readIndexSourceTool struct {
+	opts            ReadSourceToolOptions
+	overlapPolicy   ReadSourceOverlapPolicy
+	maxMergedLines  int
+	expandedMu      sync.Mutex
+	expandedSources map[int]struct{}
+}
+
+func (t *readIndexSourceTool) execute(ctx context.Context, invocation falken.ToolInvocation) (falken.ToolExecutionResult, error) {
+	select {
+	case <-ctx.Done():
+		return failedReadSourceToolResult("cancelled", ctx.Err().Error()), nil
+	default:
+	}
+	args, err := decodeReadIndexSourceArgs(invocation.Arguments)
+	if err != nil {
+		return failedReadSourceToolResult("invalid_arguments", err.Error()), nil
+	}
+	if args.SourceNumber <= 0 {
+		return failedReadSourceToolResult("invalid_arguments", "source_number must be >= 1"), nil
+	}
+	if t.opts.Registry == nil {
+		return failedReadSourceToolResult("unknown_source", fmt.Sprintf("unknown source [source %d]", args.SourceNumber)), nil
+	}
+	source, ok := t.opts.Registry.SourceByNumber(args.SourceNumber)
+	if !ok {
+		return failedReadSourceToolResult("unknown_source", fmt.Sprintf("unknown source [source %d]", args.SourceNumber)), nil
+	}
+	contextLines, warnings := normalizeReadContextLines(args.ContextLines)
+	projectedRange := projectedReadSourceRange(source.StartLine, source.EndLine, contextLines)
+	t.expandedMu.Lock()
+	expandedCandidates := expandedReadSourceCandidates(t.opts.Registry.Sources(), t.expandedSources)
+	t.expandedMu.Unlock()
+	decision := decideReadSourceOverlap(source, projectedRange, expandedCandidates, t.overlapPolicy)
+	switch decision.Kind {
+	case readSourceOverlapAlreadyCovered:
+		return t.handleAlreadyCovered(source, projectedRange, decision.CoveringSource, warnings)
+	case readSourceOverlapMergeExisting:
+		return t.handleMergeExisting(source, projectedRange, decision.CoveringSource, warnings)
+	}
+	return t.handleNewSource(source, contextLines, warnings)
+}
+
+func (t *readIndexSourceTool) handleAlreadyCovered(source rag.SourceChunk, projectedRange lineRange, coveringSource rag.SourceChunk, warnings []string) (falken.ToolExecutionResult, error) {
+	payload := readSourcePayload{
+		Success:               true,
+		Status:                "already_covered",
+		SourceNumber:          source.SourceNumber,
+		CoveredBySourceNumber: coveringSource.SourceNumber,
+		Path:                  rag.DisplayPath(source.Path, source.SourceRoot),
+		StartLine:             projectedRange.Start,
+		EndLine:               projectedRange.End,
+		CoveredByPath:         rag.DisplayPath(coveringSource.Path, coveringSource.SourceRoot),
+		CoveredByStartLine:    coveringSource.StartLine,
+		CoveredByEndLine:      coveringSource.EndLine,
+		Warnings:              warnings,
+	}
+	content := fmt.Sprintf("[source %d] already covered by expanded [source %d] %s:%d-%d.\nContinue citing [source %d] for this expanded context.",
+		source.SourceNumber,
+		coveringSource.SourceNumber,
+		rag.DisplayPath(coveringSource.Path, coveringSource.SourceRoot),
+		coveringSource.StartLine,
+		coveringSource.EndLine,
+		coveringSource.SourceNumber,
+	)
+	return falken.ToolExecutionResult{
+		Success: true,
+		Status:  "already_covered",
+		Content: content,
+		Payload: marshalReadSourcePayload(payload),
+	}, nil
+}
+
+func (t *readIndexSourceTool) handleMergeExisting(source rag.SourceChunk, projectedRange lineRange, coveringSource rag.SourceChunk, warnings []string) (falken.ToolExecutionResult, error) {
+	mergedRange := lineRange{
+		Start: minInt(coveringSource.StartLine, projectedRange.Start),
+		End:   maxInt(coveringSource.EndLine, projectedRange.End),
+	}
+	if mergedRange.len() > t.maxMergedLines {
+		payload := readSourcePayload{
+			Success:                  true,
+			Status:                   "merge_too_large",
+			SourceNumber:             source.SourceNumber,
+			CoveredBySourceNumber:    coveringSource.SourceNumber,
+			Path:                     rag.DisplayPath(source.Path, source.SourceRoot),
+			StartLine:                projectedRange.Start,
+			EndLine:                  projectedRange.End,
+			CoveredByPath:            rag.DisplayPath(coveringSource.Path, coveringSource.SourceRoot),
+			CoveredByStartLine:       coveringSource.StartLine,
+			CoveredByEndLine:         coveringSource.EndLine,
+			MaxMergedReadSourceLines: t.maxMergedLines,
+			Warnings:                 warnings,
+		}
+		content := fmt.Sprintf("requested [source %d] overlaps [source %d], but merging would exceed the max merged read range of %d lines.\nChoose a narrower source or fewer context lines.",
+			source.SourceNumber,
+			coveringSource.SourceNumber,
+			t.maxMergedLines,
+		)
+		return falken.ToolExecutionResult{
+			Success: true,
+			Status:  "merge_too_large",
+			Content: content,
+			Payload: marshalReadSourcePayload(payload),
+		}, nil
+	}
+	data, err := t.opts.ReadFile(coveringSource.Path)
+	if err != nil {
+		return failedReadSourceToolResult("read_source_failed", fmt.Sprintf("read source %q: %v", coveringSource.Path, err)), nil
+	}
+	text, startLine, endLine := sourceRangeText(string(data), mergedRange.Start, mergedRange.End)
+	if err := t.opts.Registry.ExpandSource(coveringSource.SourceNumber, startLine, endLine, text); err != nil {
+		return failedReadSourceToolResult("expand_source_failed", err.Error()), nil
+	}
+	t.expandedMu.Lock()
+	t.expandedSources[coveringSource.SourceNumber] = struct{}{}
+	t.expandedMu.Unlock()
+	payload := readSourcePayload{
+		Success:               true,
+		Status:                "merge_existing",
+		SourceNumber:          source.SourceNumber,
+		CoveredBySourceNumber: coveringSource.SourceNumber,
+		Path:                  rag.DisplayPath(source.Path, source.SourceRoot),
+		StartLine:             projectedRange.Start,
+		EndLine:               projectedRange.End,
+		CoveredByPath:         rag.DisplayPath(coveringSource.Path, coveringSource.SourceRoot),
+		CoveredByStartLine:    startLine,
+		CoveredByEndLine:      endLine,
+		Text:                  text,
+		Warnings:              warnings,
+	}
+	content := fmt.Sprintf("requested [source %d] overlaps [source %d]; expanded [source %d] to %s:%d-%d.\nText:\n%s\n\nContinue citing [source %d] for this expanded context.",
+		source.SourceNumber,
+		coveringSource.SourceNumber,
+		coveringSource.SourceNumber,
+		rag.DisplayPath(coveringSource.Path, coveringSource.SourceRoot),
+		startLine,
+		endLine,
+		text,
+		coveringSource.SourceNumber,
+	)
+	return falken.ToolExecutionResult{
+		Success: true,
+		Status:  "merge_existing",
+		Content: content,
+		Payload: marshalReadSourcePayload(payload),
+	}, nil
+}
+
+func (t *readIndexSourceTool) handleNewSource(source rag.SourceChunk, contextLines int, warnings []string) (falken.ToolExecutionResult, error) {
+	data, err := t.opts.ReadFile(source.Path)
+	if err != nil {
+		return failedReadSourceToolResult("read_source_failed", fmt.Sprintf("read source %q: %v", source.Path, err)), nil
+	}
+	text, startLine, endLine := sourceContextText(string(data), source.StartLine, source.EndLine, contextLines)
+	if err := t.opts.Registry.ExpandSource(source.SourceNumber, startLine, endLine, text); err != nil {
+		return failedReadSourceToolResult("expand_source_failed", err.Error()), nil
+	}
+	t.expandedMu.Lock()
+	t.expandedSources[source.SourceNumber] = struct{}{}
+	t.expandedMu.Unlock()
+	payload := readSourcePayload{
+		Success:      true,
+		Status:       "ok",
+		SourceNumber: source.SourceNumber,
+		Path:         rag.DisplayPath(source.Path, source.SourceRoot),
+		StartLine:    startLine,
+		EndLine:      endLine,
+		Text:         text,
+		Warnings:     warnings,
+	}
+	content := fmt.Sprintf("[source %d] %s:%d-%d expanded context\nText:\n%s\n\nContinue citing [source %d].", source.SourceNumber, rag.DisplayPath(source.Path, source.SourceRoot), startLine, endLine, text, source.SourceNumber)
+	return falken.ToolExecutionResult{
+		Success: true,
+		Status:  "ok",
+		Content: content,
+		Payload: marshalReadSourcePayload(payload),
+	}, nil
+}
+
 func NewReadIndexSourceTool(opts ReadSourceToolOptions) falken.Tool {
 	if opts.ReadFile == nil {
 		opts.ReadFile = os.ReadFile
 	}
-	overlapPolicy := normalizeReadSourceOverlapPolicy(opts.OverlapPolicy)
-	maxMergedLines := normalizeMaxMergedReadSourceLines(opts.MaxMergedReadSourceLines)
-	var expandedMu sync.Mutex
-	expandedSources := map[int]struct{}{}
-	return falken.ToolFunc(readIndexSourceDescriptor(), func(ctx context.Context, invocation falken.ToolInvocation) (falken.ToolExecutionResult, error) {
-		select {
-		case <-ctx.Done():
-			return failedReadSourceToolResult("cancelled", ctx.Err().Error()), nil
-		default:
-		}
-		args, err := decodeReadIndexSourceArgs(invocation.Arguments)
-		if err != nil {
-			return failedReadSourceToolResult("invalid_arguments", err.Error()), nil
-		}
-		if args.SourceNumber <= 0 {
-			return failedReadSourceToolResult("invalid_arguments", "source_number must be >= 1"), nil
-		}
-		if opts.Registry == nil {
-			return failedReadSourceToolResult("unknown_source", fmt.Sprintf("unknown source [source %d]", args.SourceNumber)), nil
-		}
-		source, ok := opts.Registry.SourceByNumber(args.SourceNumber)
-		if !ok {
-			return failedReadSourceToolResult("unknown_source", fmt.Sprintf("unknown source [source %d]", args.SourceNumber)), nil
-		}
-		contextLines, warnings := normalizeReadContextLines(args.ContextLines)
-		projectedRange := projectedReadSourceRange(source.StartLine, source.EndLine, contextLines)
-		expandedMu.Lock()
-		expandedCandidates := expandedReadSourceCandidates(opts.Registry.Sources(), expandedSources)
-		expandedMu.Unlock()
-		decision := decideReadSourceOverlap(source, projectedRange, expandedCandidates, overlapPolicy)
-		switch decision.Kind {
-		case readSourceOverlapAlreadyCovered:
-			payload := readSourcePayload{
-				Success:               true,
-				Status:                "already_covered",
-				SourceNumber:          source.SourceNumber,
-				CoveredBySourceNumber: decision.CoveringSource.SourceNumber,
-				Path:                  rag.DisplayPath(source.Path, source.SourceRoot),
-				StartLine:             projectedRange.Start,
-				EndLine:               projectedRange.End,
-				CoveredByPath:         rag.DisplayPath(decision.CoveringSource.Path, decision.CoveringSource.SourceRoot),
-				CoveredByStartLine:    decision.CoveringSource.StartLine,
-				CoveredByEndLine:      decision.CoveringSource.EndLine,
-				Warnings:              warnings,
-			}
-			content := fmt.Sprintf("[source %d] already covered by expanded [source %d] %s:%d-%d.\nContinue citing [source %d] for this expanded context.",
-				source.SourceNumber,
-				decision.CoveringSource.SourceNumber,
-				rag.DisplayPath(decision.CoveringSource.Path, decision.CoveringSource.SourceRoot),
-				decision.CoveringSource.StartLine,
-				decision.CoveringSource.EndLine,
-				decision.CoveringSource.SourceNumber,
-			)
-			return falken.ToolExecutionResult{
-				Success: true,
-				Status:  "already_covered",
-				Content: content,
-				Payload: marshalReadSourcePayload(payload),
-			}, nil
-		case readSourceOverlapMergeExisting:
-			mergedRange := lineRange{
-				Start: minInt(decision.CoveringSource.StartLine, projectedRange.Start),
-				End:   maxInt(decision.CoveringSource.EndLine, projectedRange.End),
-			}
-			if mergedRange.len() > maxMergedLines {
-				payload := readSourcePayload{
-					Success:                  true,
-					Status:                   "merge_too_large",
-					SourceNumber:             source.SourceNumber,
-					CoveredBySourceNumber:    decision.CoveringSource.SourceNumber,
-					Path:                     rag.DisplayPath(source.Path, source.SourceRoot),
-					StartLine:                projectedRange.Start,
-					EndLine:                  projectedRange.End,
-					CoveredByPath:            rag.DisplayPath(decision.CoveringSource.Path, decision.CoveringSource.SourceRoot),
-					CoveredByStartLine:       decision.CoveringSource.StartLine,
-					CoveredByEndLine:         decision.CoveringSource.EndLine,
-					MaxMergedReadSourceLines: maxMergedLines,
-					Warnings:                 warnings,
-				}
-				content := fmt.Sprintf("requested [source %d] overlaps [source %d], but merging would exceed the max merged read range of %d lines.\nChoose a narrower source or fewer context lines.",
-					source.SourceNumber,
-					decision.CoveringSource.SourceNumber,
-					maxMergedLines,
-				)
-				return falken.ToolExecutionResult{
-					Success: true,
-					Status:  "merge_too_large",
-					Content: content,
-					Payload: marshalReadSourcePayload(payload),
-				}, nil
-			}
-			data, err := opts.ReadFile(decision.CoveringSource.Path)
-			if err != nil {
-				return failedReadSourceToolResult("read_source_failed", fmt.Sprintf("read source %q: %v", decision.CoveringSource.Path, err)), nil
-			}
-			text, startLine, endLine := sourceRangeText(string(data), mergedRange.Start, mergedRange.End)
-			if err := opts.Registry.ExpandSource(decision.CoveringSource.SourceNumber, startLine, endLine, text); err != nil {
-				return failedReadSourceToolResult("expand_source_failed", err.Error()), nil
-			}
-			expandedMu.Lock()
-			expandedSources[decision.CoveringSource.SourceNumber] = struct{}{}
-			expandedMu.Unlock()
-			payload := readSourcePayload{
-				Success:               true,
-				Status:                "merge_existing",
-				SourceNumber:          source.SourceNumber,
-				CoveredBySourceNumber: decision.CoveringSource.SourceNumber,
-				Path:                  rag.DisplayPath(source.Path, source.SourceRoot),
-				StartLine:             projectedRange.Start,
-				EndLine:               projectedRange.End,
-				CoveredByPath:         rag.DisplayPath(decision.CoveringSource.Path, decision.CoveringSource.SourceRoot),
-				CoveredByStartLine:    startLine,
-				CoveredByEndLine:      endLine,
-				Text:                  text,
-				Warnings:              warnings,
-			}
-			content := fmt.Sprintf("requested [source %d] overlaps [source %d]; expanded [source %d] to %s:%d-%d.\nText:\n%s\n\nContinue citing [source %d] for this expanded context.",
-				source.SourceNumber,
-				decision.CoveringSource.SourceNumber,
-				decision.CoveringSource.SourceNumber,
-				rag.DisplayPath(decision.CoveringSource.Path, decision.CoveringSource.SourceRoot),
-				startLine,
-				endLine,
-				text,
-				decision.CoveringSource.SourceNumber,
-			)
-			return falken.ToolExecutionResult{
-				Success: true,
-				Status:  "merge_existing",
-				Content: content,
-				Payload: marshalReadSourcePayload(payload),
-			}, nil
-		}
-		data, err := opts.ReadFile(source.Path)
-		if err != nil {
-			return failedReadSourceToolResult("read_source_failed", fmt.Sprintf("read source %q: %v", source.Path, err)), nil
-		}
-		text, startLine, endLine := sourceContextText(string(data), source.StartLine, source.EndLine, contextLines)
-		if err := opts.Registry.ExpandSource(source.SourceNumber, startLine, endLine, text); err != nil {
-			return failedReadSourceToolResult("expand_source_failed", err.Error()), nil
-		}
-		expandedMu.Lock()
-		expandedSources[source.SourceNumber] = struct{}{}
-		expandedMu.Unlock()
-		payload := readSourcePayload{
-			Success:      true,
-			Status:       "ok",
-			SourceNumber: source.SourceNumber,
-			Path:         rag.DisplayPath(source.Path, source.SourceRoot),
-			StartLine:    startLine,
-			EndLine:      endLine,
-			Text:         text,
-			Warnings:     warnings,
-		}
-		content := fmt.Sprintf("[source %d] %s:%d-%d expanded context\nText:\n%s\n\nContinue citing [source %d].", source.SourceNumber, rag.DisplayPath(source.Path, source.SourceRoot), startLine, endLine, text, source.SourceNumber)
-		return falken.ToolExecutionResult{
-			Success: true,
-			Status:  "ok",
-			Content: content,
-			Payload: marshalReadSourcePayload(payload),
-		}, nil
-	})
+	t := &readIndexSourceTool{
+		opts:            opts,
+		overlapPolicy:   normalizeReadSourceOverlapPolicy(opts.OverlapPolicy),
+		maxMergedLines:  normalizeMaxMergedReadSourceLines(opts.MaxMergedReadSourceLines),
+		expandedSources: map[int]struct{}{},
+	}
+	return falken.ToolFunc(readIndexSourceDescriptor(), t.execute)
 }
 
 func readIndexSourceDescriptor() falken.ToolDescriptor {

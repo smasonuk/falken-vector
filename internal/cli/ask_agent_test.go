@@ -349,8 +349,8 @@ func TestAskAgentPassesCoverageAndReadSourceFlags(t *testing.T) {
 func TestAskAgentPassesDefaultMaxMergedReadSourceLines(t *testing.T) {
 	state, _ := setupEvalCLITest(t)
 	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
-		if opts.MaxMergedReadSourceLines != 300 {
-			t.Fatalf("MaxMergedReadSourceLines = %d, want CLI default 300", opts.MaxMergedReadSourceLines)
+		if opts.MaxMergedReadSourceLines != agentask.DefaultMaxMergedReadSourceLines {
+			t.Fatalf("MaxMergedReadSourceLines = %d, want CLI default %d", opts.MaxMergedReadSourceLines, agentask.DefaultMaxMergedReadSourceLines)
 		}
 		return agentask.Result{Answer: "agent answer"}
 	})
@@ -1116,8 +1116,8 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 		if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapMerge {
 			t.Fatalf("ReadSourceOverlapPolicy = %q, want broad default merge", opts.ReadSourceOverlapPolicy)
 		}
-		if opts.MaxMergedReadSourceLines != 300 {
-			t.Fatalf("MaxMergedReadSourceLines = %d, want CLI default 300", opts.MaxMergedReadSourceLines)
+		if opts.MaxMergedReadSourceLines != agentask.DefaultMaxMergedReadSourceLines {
+			t.Fatalf("MaxMergedReadSourceLines = %d, want CLI default %d", opts.MaxMergedReadSourceLines, agentask.DefaultMaxMergedReadSourceLines)
 		}
 		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
 			ID:        "call-search",

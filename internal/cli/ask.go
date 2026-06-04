@@ -282,7 +282,7 @@ func newAskCommand(opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&agentReadSourceTool, "agent-read-source-tool", false, "enable the read_index_source tool in agent mode")
 	cmd.Flags().BoolVar(&noAgentReadSourceTool, "no-agent-read-source-tool", false, "disable automatic read_index_source use in agent mode")
 	cmd.Flags().StringVar(&readSourceOverlapPolicy, "read-source-overlap-policy", "skip", "read_index_source overlap handling: skip, merge, or allow")
-	cmd.Flags().IntVar(&maxMergedReadSourceLines, "max-merged-read-source-lines", 300, "maximum line span for merged read_index_source ranges; 0 uses the default")
+	cmd.Flags().IntVar(&maxMergedReadSourceLines, "max-merged-read-source-lines", agentask.DefaultMaxMergedReadSourceLines, "maximum line span for merged read_index_source ranges; 0 uses the default")
 	addRetrievalFlags(cmd, &retrievalFlags)
 	addSourceFilterFlags(cmd, &sourceFlags)
 	return cmd

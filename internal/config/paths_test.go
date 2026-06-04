@@ -126,11 +126,82 @@ func TestAcquireWriteLockRemovesDeadProcessLock(t *testing.T) {
 	}
 }
 
-func TestAcquireWriteLockHelperProcess(t *testing.T) {
-	if os.Getenv("FALKEN_VECTOR_LOCK_HELPER") != "1" {
-		return
+func TestAcquireWriteLockHeldByOtherProcess(t *testing.T) {
+	paths, err := ResolvePaths(filepath.Join(t.TempDir(), ".falkengo"))
+	if err != nil {
+		t.Fatalf("ResolvePaths: %v", err)
 	}
-	os.Exit(0)
+	if err := EnsureStateDirs(paths); err != nil {
+		t.Fatalf("EnsureStateDirs: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestAcquireWriteLockHelperProcess")
+	cmd.Env = append(os.Environ(), "FALKEN_VECTOR_LOCK_HELPER=2")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	path := WriteLockPath(paths)
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("pid=%d\ncreated_at=2026-05-24T15:45:27Z\n", cmd.Process.Pid)), 0o600); err != nil {
+		t.Fatalf("write mock lock: %v", err)
+	}
+
+	lock, err := AcquireWriteLock(paths)
+	if err == nil {
+		lock.Release()
+		t.Fatal("AcquireWriteLock succeeded, want error")
+	}
+
+	if !strings.Contains(err.Error(), "write lock is already held") {
+		t.Errorf("error = %v, want to contain 'write lock is already held'", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("(pid %d)", cmd.Process.Pid)) {
+		t.Errorf("error = %v, want to contain '(pid %d)'", err, cmd.Process.Pid)
+	}
+}
+
+func TestAcquireWriteLockInvalidLockFile(t *testing.T) {
+	paths, err := ResolvePaths(filepath.Join(t.TempDir(), ".falkengo"))
+	if err != nil {
+		t.Fatalf("ResolvePaths: %v", err)
+	}
+	if err := EnsureStateDirs(paths); err != nil {
+		t.Fatalf("EnsureStateDirs: %v", err)
+	}
+
+	path := WriteLockPath(paths)
+	// Write a lock file with invalid content (no PID)
+	if err := os.WriteFile(path, []byte("invalid content\nno pid here\n"), 0o600); err != nil {
+		t.Fatalf("write invalid lock: %v", err)
+	}
+
+	lock, err := AcquireWriteLock(paths)
+	if err == nil {
+		lock.Release()
+		t.Fatal("AcquireWriteLock succeeded, want error")
+	}
+
+	if !strings.Contains(err.Error(), "write lock is already held") {
+		t.Errorf("error = %v, want to contain 'write lock is already held'", err)
+	}
+	// It shouldn't contain "(pid" because it's not a valid pid
+	if strings.Contains(err.Error(), "(pid") {
+		t.Errorf("error = %v, did not expect to contain '(pid'", err)
+	}
+}
+
+func TestAcquireWriteLockHelperProcess(t *testing.T) {
+	switch os.Getenv("FALKEN_VECTOR_LOCK_HELPER") {
+	case "1":
+		os.Exit(0)
+	case "2":
+		// Sleep indefinitely
+		select {}
+	}
 }
 
 func exitedProcessPID(t *testing.T) int {

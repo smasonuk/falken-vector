@@ -84,8 +84,11 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 		}))
 	}
 
-	var capturedToolCalls []string
-	trace := AgentTrace{}
+	capturedToolCalls := make([]string, 0, 8)
+	trace := AgentTrace{
+		ToolCalls:   make([]ToolCallRecord, 0, 8),
+		ToolResults: make([]ToolResultRecord, 0, 8),
+	}
 	events := func(event falken.Event) {
 		if event.ToolCall != nil {
 			capturedToolCalls = append(capturedToolCalls, event.ToolCall.Name)

@@ -65,6 +65,44 @@ func TestOpenSourceFormatsCodeEditorCommand(t *testing.T) {
 	}
 }
 
+func TestOpenSourceFormatsEditorCommandWithArgs(t *testing.T) {
+	var name string
+	var args []string
+	opener := editorOpener{
+		editor: "code --wait --new-window",
+		run: func(gotName string, gotArgs ...string) error {
+			name = gotName
+			args = append([]string(nil), gotArgs...)
+			return nil
+		},
+	}
+	if err := opener.Open("internal/rag/retrieve.go", 35); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if name != "code" || len(args) != 4 || args[0] != "--wait" || args[1] != "--new-window" || args[2] != "-g" || args[3] != "internal/rag/retrieve.go:35" {
+		t.Fatalf("command = %s %+v, want code --wait --new-window -g path:line", name, args)
+	}
+}
+
+func TestOpenSourceFormatsEditorCommandWithQuotes(t *testing.T) {
+	var name string
+	var args []string
+	opener := editorOpener{
+		editor: "bash -c 'vim \"$@\"' --",
+		run: func(gotName string, gotArgs ...string) error {
+			name = gotName
+			args = append([]string(nil), gotArgs...)
+			return nil
+		},
+	}
+	if err := opener.Open("internal/rag/retrieve.go", 35); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if name != "bash" || len(args) != 4 || args[0] != "-c" || args[1] != "vim \"$@\"" || args[2] != "--" || args[3] != "internal/rag/retrieve.go" {
+		t.Fatalf("command = %s %+v, want bash -c 'vim \"$@\"' -- path", name, args)
+	}
+}
+
 func TestOpenSourceUsesFalkengoEditorBeforeEditorFallback(t *testing.T) {
 	editor := firstEnv(func(key string) string {
 		switch key {

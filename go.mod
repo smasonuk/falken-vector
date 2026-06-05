@@ -3,6 +3,7 @@ module github.com/smasonuk/falken-vector
 go 1.26.2
 
 require (
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/hupe1980/vecgo v0.0.15
 	github.com/smasonuk/falken-core v0.1.0
 	github.com/smasonuk/falken-extra v0.1.0
@@ -15,7 +16,7 @@ require (
 	github.com/agnivade/levenshtein v1.2.1 // indirect
 	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/pkoukk/tiktoken-go v0.1.6 // indirect
-	mvdan.cc/sh/v3 v3.13.1 // indirect
+	mvdan.cc/sh/v3 v3.13.1
 )
 
 require (

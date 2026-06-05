@@ -202,6 +202,64 @@ func (e *Engine) ListIndexedDocuments(ctx context.Context) ([]IndexedDocument, e
 	return out, nil
 }
 
+func (e *Engine) prepareIngestStore(ctx context.Context, dryRun bool) (manifest.Store, func(), error) {
+	var store manifest.Store
+	var cleanup func()
+
+	if dryRun {
+		if _, err := os.Stat(e.paths.ManifestPath); err == nil {
+			sqliteStore, err := manifest.Open(e.paths.ManifestPath)
+			if err != nil {
+				return nil, nil, fmt.Errorf("open manifest database: %w", err)
+			}
+			store = sqliteStore
+		} else if errors.Is(err, os.ErrNotExist) {
+			store = manifest.EmptyStore{}
+		} else {
+			return nil, nil, fmt.Errorf("inspect manifest database: %w", err)
+		}
+		cleanup = func() {
+			if store != nil {
+				_ = store.Close()
+			}
+		}
+	} else {
+		lock, err := internalconfig.AcquireWriteLock(e.paths)
+		if err != nil {
+			return nil, nil, fmt.Errorf("acquire write lock: %w", err)
+		}
+
+		if err := internalconfig.EnsureStateDirs(e.paths); err != nil {
+			lock.Release()
+			return nil, nil, fmt.Errorf("create state directories: %w", err)
+		}
+
+		sqliteStore, err := manifest.Open(e.paths.ManifestPath)
+		if err != nil {
+			lock.Release()
+			return nil, nil, fmt.Errorf("open manifest database: %w", err)
+		}
+		store = sqliteStore
+
+		if err := sqliteStore.Init(ctx); err != nil {
+			_ = store.Close()
+			lock.Release()
+			return nil, nil, fmt.Errorf("initialize manifest database: %w", err)
+		}
+
+		cleanup = func() {
+			if store != nil {
+				_ = store.Close()
+			}
+			if lock != nil {
+				lock.Release()
+			}
+		}
+	}
+
+	return store, cleanup, nil
+}
+
 // Ingest indexes text files from a source directory without printing.
 func (e *Engine) Ingest(ctx context.Context, request IngestRequest) (IngestResult, error) {
 	if err := e.checkReady(); err != nil {
@@ -229,52 +287,12 @@ func (e *Engine) Ingest(ctx context.Context, request IngestRequest) (IngestResul
 		return result, err
 	}
 
-	var store manifest.Store
-	if normalized.DryRun {
-		if _, err := os.Stat(e.paths.ManifestPath); err == nil {
-			sqliteStore, err := manifest.Open(e.paths.ManifestPath)
-			if err != nil {
-				err = fmt.Errorf("open manifest database: %w", err)
-				emitter.emitError(EventRunFailed, err)
-				return result, err
-			}
-			store = sqliteStore
-		} else if errors.Is(err, os.ErrNotExist) {
-			store = manifest.EmptyStore{}
-		} else {
-			err = fmt.Errorf("inspect manifest database: %w", err)
-			emitter.emitError(EventRunFailed, err)
-			return result, err
-		}
-	} else {
-		lock, err := internalconfig.AcquireWriteLock(e.paths)
-		if err != nil {
-			err = fmt.Errorf("acquire write lock: %w", err)
-			emitter.emitError(EventRunFailed, err)
-			return result, err
-		}
-		defer lock.Release()
-
-		if err := internalconfig.EnsureStateDirs(e.paths); err != nil {
-			err = fmt.Errorf("create state directories: %w", err)
-			emitter.emitError(EventRunFailed, err)
-			return result, err
-		}
-		sqliteStore, err := manifest.Open(e.paths.ManifestPath)
-		if err != nil {
-			err = fmt.Errorf("open manifest database: %w", err)
-			emitter.emitError(EventRunFailed, err)
-			return result, err
-		}
-		store = sqliteStore
-		if err := sqliteStore.Init(ctx); err != nil {
-			err = fmt.Errorf("initialize manifest database: %w", err)
-			emitter.emitError(EventRunFailed, err)
-			_ = store.Close()
-			return result, err
-		}
+	store, cleanup, err := e.prepareIngestStore(ctx, normalized.DryRun)
+	if err != nil {
+		emitter.emitError(EventRunFailed, err)
+		return result, err
 	}
-	defer store.Close()
+	defer cleanup()
 
 	var embedder llm.Embedder
 	if !normalized.DryRun {

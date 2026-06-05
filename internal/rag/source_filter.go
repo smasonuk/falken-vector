@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 type SourceFilter struct {
@@ -131,7 +132,13 @@ func globCandidates(path string) []string {
 	return candidates
 }
 
+var globRegexpCache sync.Map
+
 func globRegexp(pattern string) (*regexp.Regexp, error) {
+	if cached, ok := globRegexpCache.Load(pattern); ok {
+		return cached.(*regexp.Regexp), nil
+	}
+
 	var b strings.Builder
 	b.WriteString("^")
 	for i := 0; i < len(pattern); i++ {
@@ -151,7 +158,11 @@ func globRegexp(pattern string) (*regexp.Regexp, error) {
 		}
 	}
 	b.WriteString("$")
-	return regexp.Compile(b.String())
+	re, err := regexp.Compile(b.String())
+	if err == nil {
+		globRegexpCache.Store(pattern, re)
+	}
+	return re, err
 }
 
 func pathUnderRoot(root string, path string, baseDir string) bool {

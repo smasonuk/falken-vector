@@ -18,6 +18,11 @@ import (
 
 var ErrNotFound = errors.New("manifest record not found")
 
+var (
+	validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	validColumnType = regexp.MustCompile(`^[a-zA-Z0-9_\s'"().\-]+$`)
+)
+
 type Store interface {
 	Close() error
 	Init(ctx context.Context) error
@@ -870,6 +875,10 @@ func (s *SQLiteStore) hasColumn(ctx context.Context, table string, column string
 }
 
 func (s *SQLiteStore) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
+	if !validIdentifier.MatchString(table) {
+		return nil, fmt.Errorf("invalid table name: %q", table)
+	}
+
 	s.columnsMu.Lock()
 	if columns, ok := s.columns[table]; ok {
 		s.columnsMu.Unlock()
@@ -1140,6 +1149,16 @@ func headingPathJSON(path []string) (string, error) {
 }
 
 func ensureColumn(ctx context.Context, db *sql.DB, table string, column string, columnType string) error {
+	if !validIdentifier.MatchString(table) {
+		return fmt.Errorf("invalid table name: %q", table)
+	}
+	if !validIdentifier.MatchString(column) {
+		return fmt.Errorf("invalid column name: %q", column)
+	}
+	if !validColumnType.MatchString(columnType) {
+		return fmt.Errorf("invalid column type: %q", columnType)
+	}
+
 	rows, err := db.QueryContext(ctx, `pragma table_info(`+table+`)`)
 	if err != nil {
 		return err

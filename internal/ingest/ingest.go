@@ -77,10 +77,27 @@ type pendingIndexer interface {
 	StagePendingDocument(context.Context, string, manifest.Document, []manifest.Chunk) error
 }
 
-func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, error) {
+type ingestOperation struct {
+	ctx                  context.Context
+	store                manifest.Store
+	opts                 Options
+	summary              Summary
+	embeddingConcurrency int
+	sourceRoot           string
+	files                []CandidateFile
+	discoveredPaths      map[string]struct{}
+	vectorDB             *vectorWriter
+	pending              []indexedDocument
+	pendingStore         pendingIndexer
+	usePendingStore      bool
+	runID                string
+	jobs                 []indexJob
+}
+
+func validateIngestOptions(ctx context.Context, store manifest.Store, opts Options) (Options, int, string, error) {
 	embeddingConcurrency, err := normalizeEmbeddingConcurrency(opts.EmbeddingConcurrency)
 	if err != nil {
-		return Summary{}, err
+		return opts, 0, "", err
 	}
 	if opts.ChunkSize == 0 {
 		opts.ChunkSize = 1200
@@ -101,255 +118,288 @@ func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, erro
 		opts = synchronizedOptions(opts)
 	}
 	if !opts.DryRun && opts.Embedder == nil {
-		return Summary{}, fmt.Errorf("embedder is required")
+		return opts, 0, "", fmt.Errorf("embedder is required")
 	}
 	sourceRoot, err := resolveRoot(opts.Root)
 	if err != nil {
-		return Summary{}, fmt.Errorf("resolve ingest root: %w", err)
+		return opts, 0, "", fmt.Errorf("resolve ingest root: %w", err)
 	}
 	if !opts.DryRun {
 		if pendingStore, ok := store.(manifest.PendingRunStore); ok {
 			runs, err := pendingStore.ListPendingRuns(ctx)
 			if err != nil {
 				if isContextStop(ctx, err) {
-					return Summary{}, ingestStoppedError(ctx, err)
+					return opts, 0, "", ingestStoppedError(ctx, err)
 				}
-				return Summary{}, fmt.Errorf("list pending ingest runs: %w", err)
+				return opts, 0, "", fmt.Errorf("list pending ingest runs: %w", err)
 			}
 			if len(runs) != 0 {
-				return Summary{}, ErrPendingRunDetected
+				return opts, 0, "", ErrPendingRunDetected
 			}
 		}
 	}
+	return opts, embeddingConcurrency, sourceRoot, nil
+}
 
-	progressf(opts, "scanning %s\n", sourceRoot)
-	files, err := FindCandidateFiles(ctx, WalkOptions{
-		Root:              sourceRoot,
-		StateDir:          opts.Paths.StateDir,
-		Extensions:        opts.Extensions,
-		ExcludeExtensions: opts.ExcludeExtensions,
-		ExcludeDirs:       opts.ExcludeDirs,
+func (op *ingestOperation) stopErr(err error) error {
+	clearPendingRunAfterStop(op.pendingStore, op.usePendingStore, op.runID)
+	return ingestStoppedError(op.ctx, err)
+}
+
+func (op *ingestOperation) scanFiles() error {
+	progressf(op.opts, "scanning %s\n", op.sourceRoot)
+	files, err := FindCandidateFiles(op.ctx, WalkOptions{
+		Root:              op.sourceRoot,
+		StateDir:          op.opts.Paths.StateDir,
+		Extensions:        op.opts.Extensions,
+		ExcludeExtensions: op.opts.ExcludeExtensions,
+		ExcludeDirs:       op.opts.ExcludeDirs,
 	})
 	if err != nil {
-		if isContextStop(ctx, err) {
-			return Summary{}, ingestStoppedError(ctx, err)
+		if isContextStop(op.ctx, err) {
+			return op.stopErr(err)
 		}
-		return Summary{}, fmt.Errorf("walk candidate files: %w", err)
+		return fmt.Errorf("walk candidate files: %w", err)
 	}
-	summary := Summary{Scanned: len(files), StateDir: opts.Paths.StateDir}
-	progressf(opts, "found %d candidate files\n", len(files))
-	emitProgress(opts, ProgressEvent{
-		Directory:  sourceRoot,
+	op.files = files
+	op.summary = Summary{Scanned: len(files), StateDir: op.opts.Paths.StateDir}
+	progressf(op.opts, "found %d candidate files\n", len(files))
+	emitProgress(op.opts, ProgressEvent{
+		Directory:  op.sourceRoot,
 		Action:     "scanned",
 		Scanned:    len(files),
 		TotalFiles: len(files),
 	})
-	discoveredPaths := make(map[string]struct{}, len(files))
-	vectorDB := &vectorWriter{opts: opts}
-	pending := make([]indexedDocument, 0)
-	pendingStore, usePendingStore := store.(pendingIndexer)
-	runID := ""
-	if !opts.DryRun && usePendingStore {
-		runID, err = newRunID()
-		if err != nil {
-			return summary, fmt.Errorf("create index run id: %w", err)
-		}
-	}
-	defer func() {
-		_ = vectorDB.Close()
-	}()
+	return nil
+}
 
-	jobs := make([]indexJob, 0)
-	for i, candidate := range files {
-		if err := ctx.Err(); err != nil {
-			clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-			return summary, ingestStoppedError(ctx, err)
+func (op *ingestOperation) initRunState() error {
+	op.discoveredPaths = make(map[string]struct{}, len(op.files))
+	op.vectorDB = &vectorWriter{opts: op.opts}
+	op.pending = make([]indexedDocument, 0)
+	op.pendingStore, op.usePendingStore = op.store.(pendingIndexer)
+	op.runID = ""
+	if !op.opts.DryRun && op.usePendingStore {
+		runID, err := newRunID()
+		if err != nil {
+			return fmt.Errorf("create index run id: %w", err)
 		}
-		discoveredPaths[candidate.Path] = struct{}{}
-		effectiveChunker := EffectiveChunkerMode(candidate.Path, opts.ChunkerMode)
-		decision, contentHash, err := DecideFileWithConfig(ctx, store, candidate, ChunkConfig{
+		op.runID = runID
+	}
+	op.jobs = make([]indexJob, 0)
+	return nil
+}
+
+func (op *ingestOperation) processCandidates() error {
+	for i, candidate := range op.files {
+		if err := op.ctx.Err(); err != nil {
+			return op.stopErr(err)
+		}
+		op.discoveredPaths[candidate.Path] = struct{}{}
+		effectiveChunker := EffectiveChunkerMode(candidate.Path, op.opts.ChunkerMode)
+		decision, contentHash, err := DecideFileWithConfig(op.ctx, op.store, candidate, ChunkConfig{
 			Chunker:          string(effectiveChunker),
-			ChunkSize:        opts.ChunkSize,
-			ChunkOverlap:     opts.ChunkOverlap,
+			ChunkSize:        op.opts.ChunkSize,
+			ChunkOverlap:     op.opts.ChunkOverlap,
 			IndexTextVersion: CurrentIndexTextVersion,
 		})
 		if err != nil {
-			if isContextStop(ctx, err) {
-				clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-				return summary, ingestStoppedError(ctx, err)
+			if isContextStop(op.ctx, err) {
+				return op.stopErr(err)
 			}
-			summary.FailedFiles++
-			if !opts.DryRun {
-				_ = store.MarkDocumentError(ctx, candidate.Path, err.Error())
+			op.summary.FailedFiles++
+			if !op.opts.DryRun {
+				_ = op.store.MarkDocumentError(op.ctx, candidate.Path, err.Error())
 			}
-			verbosef(opts, "failed to inspect %s: %v\n", candidate.Path, err)
+			verbosef(op.opts, "failed to inspect %s: %v\n", candidate.Path, err)
 			continue
 		}
 		switch decision {
 		case FileDecisionUnchanged:
-			summary.UnchangedFiles++
-			if opts.DryRun {
-				verbosef(opts, "would skip unchanged file: %s\n", candidate.Path)
+			op.summary.UnchangedFiles++
+			if op.opts.DryRun {
+				verbosef(op.opts, "would skip unchanged file: %s\n", candidate.Path)
 			} else {
-				verbosef(opts, "skipping unchanged %s\n", candidate.Path)
+				verbosef(op.opts, "skipping unchanged %s\n", candidate.Path)
 			}
 			continue
 		case FileDecisionNew:
-			summary.NewFiles++
-			if opts.DryRun {
-				verbosef(opts, "would index new file: %s\n", candidate.Path)
+			op.summary.NewFiles++
+			if op.opts.DryRun {
+				verbosef(op.opts, "would index new file: %s\n", candidate.Path)
 			}
 		case FileDecisionChanged:
-			summary.ChangedFiles++
-			if opts.DryRun {
-				verbosef(opts, "would re-index changed file: %s\n", candidate.Path)
+			op.summary.ChangedFiles++
+			if op.opts.DryRun {
+				verbosef(op.opts, "would re-index changed file: %s\n", candidate.Path)
 			}
 		}
 
-		progressFileDecision(opts, sourceRoot, candidate.Path, decision, i+1, len(files))
-		if !opts.DryRun {
-			jobs = append(jobs, indexJob{
-				ResultIndex:      len(jobs),
+		progressFileDecision(op.opts, op.sourceRoot, candidate.Path, decision, i+1, len(op.files))
+		if !op.opts.DryRun {
+			op.jobs = append(op.jobs, indexJob{
+				ResultIndex:      len(op.jobs),
 				Candidate:        candidate,
-				SourceRoot:       sourceRoot,
+				SourceRoot:       op.sourceRoot,
 				ContentHash:      contentHash,
 				EffectiveChunker: effectiveChunker,
 			})
 			continue
 		}
-		indexed, err := indexFile(ctx, nil, candidate, sourceRoot, contentHash, effectiveChunker, opts)
+		indexed, err := indexFile(op.ctx, nil, candidate, op.sourceRoot, contentHash, effectiveChunker, op.opts)
 		if err != nil {
-			if isContextStop(ctx, err) {
-				clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-				return summary, ingestStoppedError(ctx, err)
+			if isContextStop(op.ctx, err) {
+				return op.stopErr(err)
 			}
-			summary.FailedFiles++
-			if !opts.DryRun {
-				_ = markCandidateError(ctx, store, candidate, contentHash, opts.Now(), err)
-			}
-			verbosef(opts, "failed to index %s: %v\n", candidate.Path, err)
+			op.summary.FailedFiles++
+			verbosef(op.opts, "failed to index %s: %v\n", candidate.Path, err)
 			continue
 		}
-		if !opts.DryRun && usePendingStore {
-			if err := pendingStore.StagePendingDocument(ctx, runID, indexed.Document, indexed.Chunks); err != nil {
-				if isContextStop(ctx, err) {
-					clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-					return summary, ingestStoppedError(ctx, err)
-				}
-				_ = pendingStore.ClearPendingRun(context.Background(), runID)
-				return summary, fmt.Errorf("stage manifest rows for %s: %w", indexed.Document.Path, err)
-			}
-		} else {
-			pending = append(pending, indexed)
-		}
-		summary.ChunksEmbedded += len(indexed.Chunks)
+		op.pending = append(op.pending, indexed)
+		op.summary.ChunksEmbedded += len(indexed.Chunks)
 	}
-	if !opts.DryRun && len(jobs) != 0 {
-		results, err := indexJobs(ctx, jobs, vectorDB, opts, embeddingConcurrency)
-		if err != nil {
-			clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-			return summary, ingestStoppedError(ctx, err)
-		}
-		for _, result := range results {
-			candidate := result.Job.Candidate
-			if result.Err != nil {
-				if isContextStop(ctx, result.Err) {
-					clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-					return summary, ingestStoppedError(ctx, result.Err)
-				}
-				summary.FailedFiles++
-				_ = markCandidateError(ctx, store, candidate, result.Job.ContentHash, opts.Now(), result.Err)
-				verbosef(opts, "failed to index %s: %v\n", candidate.Path, result.Err)
-				continue
-			}
-			indexed := result.Indexed
-			if usePendingStore {
-				if err := pendingStore.StagePendingDocument(ctx, runID, indexed.Document, indexed.Chunks); err != nil {
-					if isContextStop(ctx, err) {
-						clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-						return summary, ingestStoppedError(ctx, err)
-					}
-					_ = pendingStore.ClearPendingRun(context.Background(), runID)
-					return summary, fmt.Errorf("stage manifest rows for %s: %w", indexed.Document.Path, err)
-				}
-			} else {
-				pending = append(pending, indexed)
-			}
-			summary.ChunksEmbedded += len(indexed.Chunks)
-		}
-	}
+	return nil
+}
 
-	if err := ctx.Err(); err != nil {
-		clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-		return summary, ingestStoppedError(ctx, err)
+func (op *ingestOperation) processJobs() error {
+	if op.opts.DryRun || len(op.jobs) == 0 {
+		return nil
 	}
-	deletedIDs, err := deletedDocumentsForSync(ctx, store, opts.SyncSource, sourceRoot, discoveredPaths, opts)
+	results, err := indexJobs(op.ctx, op.jobs, op.vectorDB, op.opts, op.embeddingConcurrency)
 	if err != nil {
-		if isContextStop(ctx, err) {
-			clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-			return summary, ingestStoppedError(ctx, err)
-		}
-		return summary, err
+		return op.stopErr(err)
 	}
-	summary.DeletedFiles = len(deletedIDs)
-
-	if vectorDB.HasStore() && !opts.DryRun {
-		if err := ctx.Err(); err != nil {
-			clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-			return summary, ingestStoppedError(ctx, err)
-		}
-		progressf(opts, "committing vector database\n")
-		if err := vectorDB.Commit(ctx); err != nil {
-			if isContextStop(ctx, err) {
-				clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-				return summary, ingestStoppedError(ctx, err)
+	for _, result := range results {
+		candidate := result.Job.Candidate
+		if result.Err != nil {
+			if isContextStop(op.ctx, result.Err) {
+				return op.stopErr(result.Err)
 			}
-			if usePendingStore {
-				_ = pendingStore.ClearPendingRun(context.Background(), runID)
-			}
-			return summary, fmt.Errorf("commit vector database: %w", err)
+			op.summary.FailedFiles++
+			_ = markCandidateError(op.ctx, op.store, candidate, result.Job.ContentHash, op.opts.Now(), result.Err)
+			verbosef(op.opts, "failed to index %s: %v\n", candidate.Path, result.Err)
+			continue
 		}
-	}
-	if !opts.DryRun {
-		if err := ctx.Err(); err != nil {
-			clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-			return summary, ingestStoppedError(ctx, err)
-		}
-		progressf(opts, "updating manifest\n")
-		if usePendingStore {
-			if err := pendingStore.ActivatePendingRun(ctx, runID); err != nil {
-				if isContextStop(ctx, err) {
-					clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-					return summary, ingestStoppedError(ctx, err)
+		indexed := result.Indexed
+		if op.usePendingStore {
+			if err := op.pendingStore.StagePendingDocument(op.ctx, op.runID, indexed.Document, indexed.Chunks); err != nil {
+				if isContextStop(op.ctx, err) {
+					return op.stopErr(err)
 				}
-				return summary, fmt.Errorf("activate staged manifest rows: %w", err)
+				_ = op.pendingStore.ClearPendingRun(context.Background(), op.runID)
+				return fmt.Errorf("stage manifest rows for %s: %w", indexed.Document.Path, err)
 			}
 		} else {
-			for _, indexed := range pending {
-				if err := writeIndexedDocument(ctx, store, indexed); err != nil {
-					if isContextStop(ctx, err) {
-						clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-						return summary, ingestStoppedError(ctx, err)
+			op.pending = append(op.pending, indexed)
+		}
+		op.summary.ChunksEmbedded += len(indexed.Chunks)
+	}
+	return nil
+}
+
+func (op *ingestOperation) finalizeRun() error {
+	if err := op.ctx.Err(); err != nil {
+		return op.stopErr(err)
+	}
+	deletedIDs, err := deletedDocumentsForSync(op.ctx, op.store, op.opts.SyncSource, op.sourceRoot, op.discoveredPaths, op.opts)
+	if err != nil {
+		if isContextStop(op.ctx, err) {
+			return op.stopErr(err)
+		}
+		return err
+	}
+	op.summary.DeletedFiles = len(deletedIDs)
+
+	if op.vectorDB.HasStore() && !op.opts.DryRun {
+		if err := op.ctx.Err(); err != nil {
+			return op.stopErr(err)
+		}
+		progressf(op.opts, "committing vector database\n")
+		if err := op.vectorDB.Commit(op.ctx); err != nil {
+			if isContextStop(op.ctx, err) {
+				return op.stopErr(err)
+			}
+			if op.usePendingStore {
+				_ = op.pendingStore.ClearPendingRun(context.Background(), op.runID)
+			}
+			return fmt.Errorf("commit vector database: %w", err)
+		}
+	}
+	if !op.opts.DryRun {
+		if err := op.ctx.Err(); err != nil {
+			return op.stopErr(err)
+		}
+		progressf(op.opts, "updating manifest\n")
+		if op.usePendingStore {
+			if err := op.pendingStore.ActivatePendingRun(op.ctx, op.runID); err != nil {
+				if isContextStop(op.ctx, err) {
+					return op.stopErr(err)
+				}
+				return fmt.Errorf("activate staged manifest rows: %w", err)
+			}
+		} else {
+			for _, indexed := range op.pending {
+				if err := writeIndexedDocument(op.ctx, op.store, indexed); err != nil {
+					if isContextStop(op.ctx, err) {
+						return op.stopErr(err)
 					}
-					return summary, err
+					return err
 				}
 			}
 		}
 		if len(deletedIDs) != 0 {
-			if err := store.MarkDocumentsDeleted(ctx, deletedIDs, opts.Now()); err != nil {
-				if isContextStop(ctx, err) {
-					clearPendingRunAfterStop(pendingStore, usePendingStore, runID)
-					return summary, ingestStoppedError(ctx, err)
+			if err := op.store.MarkDocumentsDeleted(op.ctx, deletedIDs, op.opts.Now()); err != nil {
+				if isContextStop(op.ctx, err) {
+					return op.stopErr(err)
 				}
-				return summary, fmt.Errorf("mark deleted source documents: %w", err)
+				return fmt.Errorf("mark deleted source documents: %w", err)
 			}
 		}
 	}
-	processedCandidates := summary.Scanned - summary.UnchangedFiles
-	if processedCandidates > 0 && summary.FailedFiles == processedCandidates {
-		return summary, fmt.Errorf("all files failed to index")
+	processedCandidates := op.summary.Scanned - op.summary.UnchangedFiles
+	if processedCandidates > 0 && op.summary.FailedFiles == processedCandidates {
+		return fmt.Errorf("all files failed to index")
 	}
-	return summary, nil
+	return nil
+}
+
+func Run(ctx context.Context, store manifest.Store, opts Options) (Summary, error) {
+	opts, embeddingConcurrency, sourceRoot, err := validateIngestOptions(ctx, store, opts)
+	if err != nil {
+		return Summary{}, err
+	}
+
+	op := &ingestOperation{
+		ctx:                  ctx,
+		store:                store,
+		opts:                 opts,
+		embeddingConcurrency: embeddingConcurrency,
+		sourceRoot:           sourceRoot,
+	}
+
+	if err := op.scanFiles(); err != nil {
+		return op.summary, err
+	}
+	if err := op.initRunState(); err != nil {
+		return op.summary, err
+	}
+	defer func() {
+		if op.vectorDB != nil {
+			_ = op.vectorDB.Close()
+		}
+	}()
+
+	if err := op.processCandidates(); err != nil {
+		return op.summary, err
+	}
+	if err := op.processJobs(); err != nil {
+		return op.summary, err
+	}
+	if err := op.finalizeRun(); err != nil {
+		return op.summary, err
+	}
+
+	return op.summary, nil
 }
 
 type indexedDocument struct {

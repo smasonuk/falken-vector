@@ -23,91 +23,16 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 			}
 		}
 	}()
-	if strings.TrimSpace(opts.Question) == "" {
-		return Result{}, errors.New("question is required")
-	}
-	if opts.AgentLLM == nil {
-		return Result{}, errors.New("agent LLM is required")
-	}
-	if opts.Store == nil {
-		return Result{}, errors.New("manifest store is required")
-	}
-	if opts.Paths.ManifestPath == "" {
-		return Result{}, errors.New("paths are required")
-	}
-	if opts.RetrieveWithPlan == nil {
-		opts.RetrieveWithPlan = rag.RetrieveWithPlan
-	}
-	if opts.MaxSearchCalls <= 0 {
-		opts.MaxSearchCalls = 6
-	}
-	if opts.MaxToolTopK <= 0 {
-		opts.MaxToolTopK = 20
-	}
-	if opts.ReadSourceOverlapPolicy == ReadSourceOverlapDefault {
-		opts.ReadSourceOverlapPolicy = ReadSourceOverlapSkip
+	if err := validateAndNormalizeOptions(&opts); err != nil {
+		return Result{}, err
 	}
 	coveragePolicy := normalizeCoveragePolicy(opts)
 	thinPolicy := normalizeThinSourcePolicy(opts)
-	documentPromotionOpts := documentPromotionOptionsFromRunOptions(opts)
-
 	registry := NewCitationRegistry()
-	searchTool := NewSearchIndexTool(SearchToolOptions{
-		Paths:                 opts.Paths,
-		Store:                 opts.Store,
-		UserQuestion:          opts.Question,
-		RetrievalDefaults:     opts.RetrievalDefaults,
-		Registry:              registry,
-		EmbedderFactory:       opts.EmbedderFactory,
-		RetrieveWithPlan:      opts.RetrieveWithPlan,
-		PrepareLexicalIndex:   opts.PrepareLexicalIndex,
-		ConfigureQueryPlanner: opts.ConfigureQueryPlanner,
-		MaxSearchCalls:        opts.MaxSearchCalls,
-		MaxTopK:               opts.MaxToolTopK,
-		MaxExpansionQueries:   opts.MaxBroadExpansionQueries,
-		MaxRetrievalCalls:     opts.MaxRetrievalCalls,
-		DocumentPromotion:     documentPromotionOpts,
-	})
-	agentTools := []falken.Tool{searchTool}
-	if opts.EnableReadSourceTool {
-		agentTools = append(agentTools, NewReadIndexSourceTool(ReadSourceToolOptions{
-			Registry:                 registry,
-			OverlapPolicy:            opts.ReadSourceOverlapPolicy,
-			MaxMergedReadSourceLines: opts.MaxMergedReadSourceLines,
-		}))
-	}
-	if !opts.DisableDocumentPromotion {
-		agentTools = append(agentTools, NewReadIndexDocumentTool(ReadDocumentToolOptions{
-			Registry:  registry,
-			MaxLines:  documentPromotionOpts.MaxDocumentReadLines,
-			MaxTokens: documentPromotionOpts.MaxDocumentReadTokens,
-		}))
-	}
-
 	var capturedToolCalls []string
 	trace := AgentTrace{}
-	events := func(event falken.Event) {
-		if event.ToolCall != nil {
-			capturedToolCalls = append(capturedToolCalls, event.ToolCall.Name)
-			trace.ToolCalls = append(trace.ToolCalls, toolCallRecord(*event.ToolCall))
-		}
-		if event.ToolResult != nil {
-			trace.ToolResults = append(trace.ToolResults, toolResultRecord(*event.ToolResult))
-		}
-		if opts.Events != nil {
-			opts.Events(event)
-		}
-	}
 
-	agent, err := falken.NewAgent(ctx, falken.AgentConfig{
-		LLM:          opts.AgentLLM,
-		SystemPrompt: agentSystemPrompt(opts.EnableReadSourceTool, !opts.DisableDocumentPromotion, opts.SourceScopeNote),
-		Tools:        agentTools,
-		Events:       events,
-		Permissions: falken.SimplePermissions{
-			AllowNetwork: true,
-		},
-	})
+	agent, err := createAgent(ctx, opts, registry, &capturedToolCalls, &trace)
 	if err != nil {
 		return Result{}, err
 	}
@@ -124,126 +49,21 @@ func Run(ctx context.Context, opts Options) (final Result, err error) {
 		ToolCalls: append([]string(nil), capturedToolCalls...),
 		Trace:     cloneAgentTrace(trace),
 	}
-	normalizeResultCitations(&result)
-	answer = result.Answer
-	policy := normalizeAgentCitationPolicy(opts.CitationPolicy)
-	if policy == rag.CitationPolicyOff {
-		result.CitationValid = true
-		return result, nil
-	}
-	validation := registry.Validate(answer)
-	if validation.Valid && len(result.Sources) == 0 && len(result.ToolCalls) == 0 {
-		result.CitationWarnings = append(result.CitationWarnings, "agent did not return cited indexed sources")
-		result.CitationValid = false
-		return result, nil
-	}
-	if unsupportedZeroSourceAnswer(validation, result.Sources, result.ToolCalls, answer) {
-		result.CitationWarnings = append(result.CitationWarnings, unsupportedZeroSourceAnswerWarning)
-		if policy != rag.CitationPolicyValidateAndRetry {
-			result.CitationValid = false
-			return result, nil
-		}
-		retryAnswer, err := agent.Run(ctx, correctiveUnsupportedAnswerPrompt(answer))
-		if err != nil {
-			result.CitationWarnings = append(result.CitationWarnings, "citation retry failed: "+err.Error())
-			return result, nil
-		}
-		result.Retried = true
-		result.Answer = retryAnswer
-		normalizeResultCitations(&result)
-		result.Sources = registry.Sources()
-		result.ToolCalls = append([]string(nil), capturedToolCalls...)
-		result.Trace = cloneAgentTrace(trace)
-		return validateRetryResult(&result, registry)
-	}
-	if validation.Valid {
-		coverageRetries := 0
-		coverageComplete := false
-		thinRetries := 0
-		for {
-			if !coverageComplete {
-				stats := searchStats(trace)
-				decision := coverageNudgeDecision(opts.Question, coveragePolicy, stats.SearchCalls, stats.SuccessfulSearchCalls, len(result.Sources), opts.MaxSearchCalls, coverageRetries)
-				if decision.Nudge {
-					result.CoverageWarnings = append(result.CoverageWarnings, coverageNudgeWarning(stats.SuccessfulSearchCalls, decision.RemainingNeeded))
-					retryAnswer, err := agent.Run(ctx, coverageNudgePrompt(opts.Question, answer, stats.SuccessfulSearchCalls, decision.RemainingNeeded))
-					if err != nil {
-						result.CitationWarnings = append(result.CitationWarnings, "coverage nudge failed: "+err.Error())
-						result.CitationValid = true
-						return result, nil
-					}
-					coverageRetries++
-					result.Retried = true
-					result.CoverageNudged = true
-					result.Answer = retryAnswer
-					normalizeResultCitations(&result)
-					result.Sources = registry.Sources()
-					result.ToolCalls = append([]string(nil), capturedToolCalls...)
-					result.Trace = cloneAgentTrace(trace)
-					validation = registry.Validate(result.Answer)
-					if !validation.Valid || unsupportedZeroSourceAnswer(validation, result.Sources, result.ToolCalls, result.Answer) {
-						return validateRetryResult(&result, registry)
-					}
-					answer = result.Answer
-					continue
-				}
-				if warning := coverageSkippedWarning(decision.Reason); warning != "" {
-					result.CoverageWarnings = append(result.CoverageWarnings, warning)
-				}
-				coverageComplete = true
-			}
 
-			thinDecision := thinSourceNudgeDecision(opts.Question, opts.EnableReadSourceTool, thinPolicy, result.Answer, result.Sources, trace, thinRetries)
-			if !thinDecision.Nudge {
-				if thinRetries == 0 {
-					if warning := thinSourceSkippedWarning(thinDecision.Reason); warning != "" {
-						result.ThinSourceWarnings = append(result.ThinSourceWarnings, warning)
-					}
-				}
-				result.CitationValid = true
-				return result, nil
-			}
-			result.ThinSourceWarnings = append(result.ThinSourceWarnings, thinSourceNudgeWarning(thinDecision.SourceNumbers))
-			emitAgentNote(opts.Events, "agent "+thinSourceNudgeWarning(thinDecision.SourceNumbers))
-			retryAnswer, err := agent.Run(ctx, thinSourceNudgePrompt(opts.Question, result.Answer, thinDecision.SourceNumbers, thinDecision.ContextLines))
-			if err != nil {
-				result.ThinSourceWarnings = append(result.ThinSourceWarnings, "thin-source nudge failed: "+err.Error())
-				result.CitationValid = true
-				return result, nil
-			}
-			thinRetries++
-			result.Retried = true
-			result.ThinSourceNudged = true
-			result.Answer = retryAnswer
-			normalizeResultCitations(&result)
-			result.Sources = registry.Sources()
-			result.ToolCalls = append([]string(nil), capturedToolCalls...)
-			result.Trace = cloneAgentTrace(trace)
-			validation = registry.Validate(result.Answer)
-			if !validation.Valid || unsupportedZeroSourceAnswer(validation, result.Sources, result.ToolCalls, result.Answer) {
-				return validateRetryResult(&result, registry)
-			}
-			answer = result.Answer
-		}
+	runCtx := runContext{
+		agent:             agent,
+		registry:          registry,
+		opts:              opts,
+		capturedToolCalls: &capturedToolCalls,
+		trace:             &trace,
 	}
 
-	result.CitationWarnings = append(result.CitationWarnings, validation.Warnings...)
-	if policy != rag.CitationPolicyValidateAndRetry {
-		return result, nil
-	}
-
-	retryAnswer, err := agent.Run(ctx, correctiveCitationPrompt(validation.Warnings, answer))
+	err = processAgentResult(ctx, runCtx, &result, coveragePolicy, thinPolicy)
 	if err != nil {
-		result.CitationWarnings = append(result.CitationWarnings, "citation retry failed: "+err.Error())
-		return result, nil
+		return Result{}, err
 	}
-	result.Retried = true
-	result.Answer = retryAnswer
-	normalizeResultCitations(&result)
-	result.Sources = registry.Sources()
-	result.ToolCalls = append([]string(nil), capturedToolCalls...)
-	result.Trace = cloneAgentTrace(trace)
-	return validateRetryResult(&result, registry)
+
+	return result, nil
 }
 
 func validateRetryResult(result *Result, registry *CitationRegistry) (Result, error) {
@@ -547,4 +367,230 @@ func normalizeAgentCitationPolicy(policy rag.CitationPolicy) rag.CitationPolicy 
 	default:
 		return rag.CitationPolicyValidateAndRetry
 	}
+}
+
+func validateAndNormalizeOptions(opts *Options) error {
+	if strings.TrimSpace(opts.Question) == "" {
+		return errors.New("question is required")
+	}
+	if opts.AgentLLM == nil {
+		return errors.New("agent LLM is required")
+	}
+	if opts.Store == nil {
+		return errors.New("manifest store is required")
+	}
+	if opts.Paths.ManifestPath == "" {
+		return errors.New("paths are required")
+	}
+	if opts.RetrieveWithPlan == nil {
+		opts.RetrieveWithPlan = rag.RetrieveWithPlan
+	}
+	if opts.MaxSearchCalls <= 0 {
+		opts.MaxSearchCalls = 6
+	}
+	if opts.MaxToolTopK <= 0 {
+		opts.MaxToolTopK = 20
+	}
+	if opts.ReadSourceOverlapPolicy == ReadSourceOverlapDefault {
+		opts.ReadSourceOverlapPolicy = ReadSourceOverlapSkip
+	}
+	return nil
+}
+
+func createAgent(ctx context.Context, opts Options, registry *CitationRegistry, capturedToolCalls *[]string, trace *AgentTrace) (*falken.Agent, error) {
+	documentPromotionOpts := documentPromotionOptionsFromRunOptions(opts)
+
+	searchTool := NewSearchIndexTool(SearchToolOptions{
+		Paths:                 opts.Paths,
+		Store:                 opts.Store,
+		UserQuestion:          opts.Question,
+		RetrievalDefaults:     opts.RetrievalDefaults,
+		Registry:              registry,
+		EmbedderFactory:       opts.EmbedderFactory,
+		RetrieveWithPlan:      opts.RetrieveWithPlan,
+		PrepareLexicalIndex:   opts.PrepareLexicalIndex,
+		ConfigureQueryPlanner: opts.ConfigureQueryPlanner,
+		MaxSearchCalls:        opts.MaxSearchCalls,
+		MaxTopK:               opts.MaxToolTopK,
+		MaxExpansionQueries:   opts.MaxBroadExpansionQueries,
+		MaxRetrievalCalls:     opts.MaxRetrievalCalls,
+		DocumentPromotion:     documentPromotionOpts,
+	})
+	agentTools := []falken.Tool{searchTool}
+	if opts.EnableReadSourceTool {
+		agentTools = append(agentTools, NewReadIndexSourceTool(ReadSourceToolOptions{
+			Registry:                 registry,
+			OverlapPolicy:            opts.ReadSourceOverlapPolicy,
+			MaxMergedReadSourceLines: opts.MaxMergedReadSourceLines,
+		}))
+	}
+	if !opts.DisableDocumentPromotion {
+		agentTools = append(agentTools, NewReadIndexDocumentTool(ReadDocumentToolOptions{
+			Registry:  registry,
+			MaxLines:  documentPromotionOpts.MaxDocumentReadLines,
+			MaxTokens: documentPromotionOpts.MaxDocumentReadTokens,
+		}))
+	}
+
+	events := func(event falken.Event) {
+		if event.ToolCall != nil {
+			*capturedToolCalls = append(*capturedToolCalls, event.ToolCall.Name)
+			trace.ToolCalls = append(trace.ToolCalls, toolCallRecord(*event.ToolCall))
+		}
+		if event.ToolResult != nil {
+			trace.ToolResults = append(trace.ToolResults, toolResultRecord(*event.ToolResult))
+		}
+		if opts.Events != nil {
+			opts.Events(event)
+		}
+	}
+
+	return falken.NewAgent(ctx, falken.AgentConfig{
+		LLM:          opts.AgentLLM,
+		SystemPrompt: agentSystemPrompt(opts.EnableReadSourceTool, !opts.DisableDocumentPromotion, opts.SourceScopeNote),
+		Tools:        agentTools,
+		Events:       events,
+		Permissions: falken.SimplePermissions{
+			AllowNetwork: true,
+		},
+	})
+}
+
+type runContext struct {
+	agent             *falken.Agent
+	registry          *CitationRegistry
+	opts              Options
+	capturedToolCalls *[]string
+	trace             *AgentTrace
+}
+
+func handleUnsupportedAnswer(ctx context.Context, runCtx runContext, result *Result, policy rag.CitationPolicy, answer string) error {
+	result.CitationWarnings = append(result.CitationWarnings, unsupportedZeroSourceAnswerWarning)
+	if policy != rag.CitationPolicyValidateAndRetry {
+		result.CitationValid = false
+		return nil
+	}
+	retryAnswer, err := runCtx.agent.Run(ctx, correctiveUnsupportedAnswerPrompt(answer))
+	if err != nil {
+		result.CitationWarnings = append(result.CitationWarnings, "citation retry failed: "+err.Error())
+		return nil
+	}
+	updateResultFromRetry(result, runCtx, retryAnswer)
+	retryResult, err := validateRetryResult(result, runCtx.registry)
+	*result = retryResult
+	return err
+}
+
+func handleCitationRetry(ctx context.Context, runCtx runContext, result *Result, validation rag.CitationValidation) error {
+	result.CitationWarnings = append(result.CitationWarnings, validation.Warnings...)
+	policy := normalizeAgentCitationPolicy(runCtx.opts.CitationPolicy)
+	if policy != rag.CitationPolicyValidateAndRetry {
+		return nil
+	}
+
+	retryAnswer, err := runCtx.agent.Run(ctx, correctiveCitationPrompt(validation.Warnings, result.Answer))
+	if err != nil {
+		result.CitationWarnings = append(result.CitationWarnings, "citation retry failed: "+err.Error())
+		return nil
+	}
+	updateResultFromRetry(result, runCtx, retryAnswer)
+	retryResult, err := validateRetryResult(result, runCtx.registry)
+	*result = retryResult
+	return err
+}
+
+func handleNudges(ctx context.Context, runCtx runContext, result *Result, coveragePolicy coveragePolicy, thinPolicy thinSourcePolicy, validation rag.CitationValidation) error {
+	coverageRetries := 0
+	coverageComplete := false
+	thinRetries := 0
+	for {
+		if !coverageComplete {
+			stats := searchStats(*runCtx.trace)
+			decision := coverageNudgeDecision(runCtx.opts.Question, coveragePolicy, stats.SearchCalls, stats.SuccessfulSearchCalls, len(result.Sources), runCtx.opts.MaxSearchCalls, coverageRetries)
+			if decision.Nudge {
+				result.CoverageWarnings = append(result.CoverageWarnings, coverageNudgeWarning(stats.SuccessfulSearchCalls, decision.RemainingNeeded))
+				retryAnswer, err := runCtx.agent.Run(ctx, coverageNudgePrompt(runCtx.opts.Question, result.Answer, stats.SuccessfulSearchCalls, decision.RemainingNeeded))
+				if err != nil {
+					result.CitationWarnings = append(result.CitationWarnings, "coverage nudge failed: "+err.Error())
+					result.CitationValid = true
+					return nil
+				}
+				coverageRetries++
+				result.CoverageNudged = true
+				updateResultFromRetry(result, runCtx, retryAnswer)
+				validation = runCtx.registry.Validate(result.Answer)
+				if !validation.Valid || unsupportedZeroSourceAnswer(validation, result.Sources, result.ToolCalls, result.Answer) {
+					retryResult, err := validateRetryResult(result, runCtx.registry)
+					*result = retryResult
+					return err
+				}
+				continue
+			}
+			if warning := coverageSkippedWarning(decision.Reason); warning != "" {
+				result.CoverageWarnings = append(result.CoverageWarnings, warning)
+			}
+			coverageComplete = true
+		}
+
+		thinDecision := thinSourceNudgeDecision(runCtx.opts.Question, runCtx.opts.EnableReadSourceTool, thinPolicy, result.Answer, result.Sources, *runCtx.trace, thinRetries)
+		if !thinDecision.Nudge {
+			if thinRetries == 0 {
+				if warning := thinSourceSkippedWarning(thinDecision.Reason); warning != "" {
+					result.ThinSourceWarnings = append(result.ThinSourceWarnings, warning)
+				}
+			}
+			result.CitationValid = true
+			return nil
+		}
+		result.ThinSourceWarnings = append(result.ThinSourceWarnings, thinSourceNudgeWarning(thinDecision.SourceNumbers))
+		emitAgentNote(runCtx.opts.Events, "agent "+thinSourceNudgeWarning(thinDecision.SourceNumbers))
+		retryAnswer, err := runCtx.agent.Run(ctx, thinSourceNudgePrompt(runCtx.opts.Question, result.Answer, thinDecision.SourceNumbers, thinDecision.ContextLines))
+		if err != nil {
+			result.ThinSourceWarnings = append(result.ThinSourceWarnings, "thin-source nudge failed: "+err.Error())
+			result.CitationValid = true
+			return nil
+		}
+		thinRetries++
+		result.ThinSourceNudged = true
+		updateResultFromRetry(result, runCtx, retryAnswer)
+		validation = runCtx.registry.Validate(result.Answer)
+		if !validation.Valid || unsupportedZeroSourceAnswer(validation, result.Sources, result.ToolCalls, result.Answer) {
+			retryResult, err := validateRetryResult(result, runCtx.registry)
+			*result = retryResult
+			return err
+		}
+	}
+}
+
+func processAgentResult(ctx context.Context, runCtx runContext, result *Result, coveragePolicy coveragePolicy, thinPolicy thinSourcePolicy) error {
+	normalizeResultCitations(result)
+	answer := result.Answer
+	policy := normalizeAgentCitationPolicy(runCtx.opts.CitationPolicy)
+	if policy == rag.CitationPolicyOff {
+		result.CitationValid = true
+		return nil
+	}
+	validation := runCtx.registry.Validate(answer)
+	if validation.Valid && len(result.Sources) == 0 && len(result.ToolCalls) == 0 {
+		result.CitationWarnings = append(result.CitationWarnings, "agent did not return cited indexed sources")
+		result.CitationValid = false
+		return nil
+	}
+	if unsupportedZeroSourceAnswer(validation, result.Sources, result.ToolCalls, answer) {
+		return handleUnsupportedAnswer(ctx, runCtx, result, policy, answer)
+	}
+	if validation.Valid {
+		return handleNudges(ctx, runCtx, result, coveragePolicy, thinPolicy, validation)
+	}
+
+	return handleCitationRetry(ctx, runCtx, result, validation)
+}
+
+func updateResultFromRetry(result *Result, runCtx runContext, retryAnswer string) {
+	result.Retried = true
+	result.Answer = retryAnswer
+	normalizeResultCitations(result)
+	result.Sources = runCtx.registry.Sources()
+	result.ToolCalls = append([]string(nil), *runCtx.capturedToolCalls...)
+	result.Trace = cloneAgentTrace(*runCtx.trace)
 }

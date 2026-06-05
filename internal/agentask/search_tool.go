@@ -116,95 +116,86 @@ func searchIndexDescriptor() falken.ToolDescriptor {
 	}
 }
 
-func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.ToolInvocation) (falken.ToolExecutionResult, error) {
-	maxSearchCalls := s.opts.MaxSearchCalls
-	if maxSearchCalls <= 0 {
-		maxSearchCalls = 6
-	}
-	args, err := decodeSearchIndexArgs(invocation.Arguments)
-	if err != nil {
-		return failedSearchToolResult("invalid_arguments", err.Error(), nil), nil
-	}
-	query := normalizeSearchQuery(args.Query)
-	if query == "" {
-		return failedSearchToolResult("invalid_arguments", "query is required", nil), nil
-	}
-	originalQuery := strings.TrimSpace(args.Query)
-	queryNormalized := originalQuery != "" && query != originalQuery
-	payloadOriginalQuery := ""
-	if queryNormalized {
-		payloadOriginalQuery = originalQuery
-	}
+type parsedSearchArgs struct {
+	query                string
+	originalQuery        string
+	queryNormalized      bool
+	payloadOriginalQuery string
+	retrieveOpts         rag.RetrieveOptions
+	topK                 int
+	warnings             []string
+	mode                 rag.RetrievalMode
+	strategy             string
+	maxExpansionQueries  int
+}
 
-	retrieveOpts := s.opts.RetrievalDefaults
-	topK, warnings := normalizeSearchTopK(args.TopK, retrieveOpts.TopK, s.opts.MaxTopK)
-	mode, err := normalizeSearchMode(args.Retrieval, retrieveOpts.Mode)
-	if err != nil {
-		return failedSearchToolResult("invalid_retrieval", err.Error(), nil), nil
-	}
-	strategy, err := normalizeSearchStrategy(args.Strategy)
-	if err != nil {
-		return failedSearchToolResult("invalid_strategy", err.Error(), nil), nil
-	}
-	if strings.TrimSpace(args.Strategy) == "" && isBroadCoverageQuestion(s.opts.UserQuestion) {
-		strategy = "broad"
-	}
-	maxExpansionQueries := s.opts.MaxExpansionQueries
-	if maxExpansionQueries < 0 {
-		maxExpansionQueries = 0
-	} else if maxExpansionQueries == 0 {
-		maxExpansionQueries = 2
-	}
+type retrievalResult struct {
+	result           rag.RetrieveResult
+	seedPlan         rag.QueryPlan
+	internalPlans    []searchQueryPlanPayload
+	expansionQueries []string
+	suggestedQueries []string
+	retrievalCalls   int
+	warnings         []string
+	retrieveOpts     rag.RetrieveOptions
+}
 
-	s.mu.Lock()
-	if s.calls >= maxSearchCalls {
-		s.mu.Unlock()
-		return failedSearchToolResult("search_call_limit", "search_index call limit exceeded", nil), nil
-	}
-	s.calls++
-	s.mu.Unlock()
+func (s *searchIndexToolState) performRetrievalAndExpansion(ctx context.Context, query string, retrieveOpts rag.RetrieveOptions, topK int, mode rag.RetrievalMode, strategy string, maxExpansionQueries int, warnings []string) (retrievalResult, *falken.ToolExecutionResult) {
+	var res retrievalResult
+	res.warnings = warnings
 
 	if !s.reserveRetrievalCall() {
-		return failedSearchToolResult("retrieval_call_limit", "search_index retrieval call limit exceeded", nil), nil
+		failure := failedSearchToolResult("retrieval_call_limit", "search_index retrieval call limit exceeded", nil)
+		return res, &failure
 	}
-	retrieveOpts, result, failure, ok := s.retrieveOnce(ctx, retrieveOpts, query, topK, mode, true)
+	var ok bool
+	var failure falken.ToolExecutionResult
+	retrieveOpts, res.result, failure, ok = s.retrieveOnce(ctx, retrieveOpts, query, topK, mode, true)
 	if !ok {
-		return failure, nil
+		return res, &failure
 	}
-	seedPlan := result.Plan
-	internalPlans := []searchQueryPlanPayload{queryPlanPayload(seedPlan)}
-	retrievalCalls := 1
-	expansionQueries := []string{}
-	if strategy == "broad" && len(result.Chunks) != 0 && maxExpansionQueries > 0 {
-		seedSources := sourceChunksFromRetrieved(result.Chunks)
+	res.seedPlan = res.result.Plan
+	res.internalPlans = []searchQueryPlanPayload{queryPlanPayload(res.seedPlan)}
+	res.retrievalCalls = 1
+	res.expansionQueries = []string{}
+
+	if strategy == "broad" && len(res.result.Chunks) != 0 && maxExpansionQueries > 0 {
+		seedSources := sourceChunksFromRetrieved(res.result.Chunks)
 		candidateExpansionQueries := SuggestBroadExpansionQueries(query, seedSources, maxExpansionQueries)
 		if len(candidateExpansionQueries) != 0 {
-			results := []rag.RetrieveResult{result}
+			results := []rag.RetrieveResult{res.result}
 			for _, expansionQuery := range candidateExpansionQueries {
 				if !s.reserveRetrievalCall() {
-					warnings = append(warnings, fmt.Sprintf("broad expansion stopped after %d expansion queries because max retrieval calls was reached", len(expansionQueries)))
+					res.warnings = append(res.warnings, fmt.Sprintf("broad expansion stopped after %d expansion queries because max retrieval calls was reached", len(res.expansionQueries)))
 					break
 				}
-				expansionQueries = append(expansionQueries, expansionQuery)
+				res.expansionQueries = append(res.expansionQueries, expansionQuery)
 				expansionOpts := s.opts.RetrievalDefaults
 				expansionOpts.QueryPlannerMode = rag.QueryPlannerModeNone
 				expansionOpts.QueryPlanner = nil
-				_, expansionResult, failure, ok := s.retrieveOnce(ctx, expansionOpts, expansionQuery, topK, mode, false)
+				var expansionResult rag.RetrieveResult
+				_, expansionResult, failure, ok = s.retrieveOnce(ctx, expansionOpts, expansionQuery, topK, mode, false)
 				if !ok {
-					return failure, nil
+					return res, &failure
 				}
-				retrievalCalls++
-				internalPlans = append(internalPlans, queryPlanPayload(expansionResult.Plan))
+				res.retrievalCalls++
+				res.internalPlans = append(res.internalPlans, queryPlanPayload(expansionResult.Plan))
 				results = append(results, expansionResult)
 			}
-			result = mergeBroadSearchResultsForQuery(query, results, retrieveOpts.TopK)
+			res.result = mergeBroadSearchResultsForQuery(query, results, retrieveOpts.TopK)
 		}
 	}
-	suggestedQueries := []string{}
-	if strategy == "focused" && len(result.Chunks) != 0 {
-		suggestedQueries = SuggestAgentFollowupHints(query, sourceChunksFromRetrieved(result.Chunks), 3)
+
+	res.suggestedQueries = []string{}
+	if strategy == "focused" && len(res.result.Chunks) != 0 {
+		res.suggestedQueries = SuggestAgentFollowupHints(query, sourceChunksFromRetrieved(res.result.Chunks), 3)
 	}
 
+	res.retrieveOpts = retrieveOpts
+	return res, nil
+}
+
+func (s *searchIndexToolState) registerSources(query, payloadOriginalQuery string, queryNormalized bool, strategy string, retrieveOpts rag.RetrieveOptions, seedPlan rag.QueryPlan, internalPlans []searchQueryPlanPayload, expansionQueries, suggestedQueries []string, retrievalCalls int, warnings []string, result rag.RetrieveResult) (searchToolPayload, []string) {
 	sources := make([]searchSourcePayload, 0, len(result.Chunks))
 	registeredSources := make([]rag.SourceChunk, 0, len(result.Chunks))
 	beforeSourceCount := s.opts.Registry.SourceCount()
@@ -266,7 +257,95 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 		DocumentPromotions: promotionDecisions,
 		Warnings:           warnings,
 	}
-	return successfulSearchToolResult(renderSearchToolContent(query, strategy, seedPlan, expansionQueries, suggestedQueries, sources, warnings, payload.NewSources, payload.DuplicateSources, documentMatches, promotedContents), payload), nil
+	return payload, promotedContents
+}
+
+func (s *searchIndexToolState) parseSearchArgs(invocation falken.ToolInvocation) (parsedSearchArgs, *falken.ToolExecutionResult) {
+	var parsed parsedSearchArgs
+	args, err := decodeSearchIndexArgs(invocation.Arguments)
+	if err != nil {
+		res := failedSearchToolResult("invalid_arguments", err.Error(), nil)
+		return parsed, &res
+	}
+	parsed.query = normalizeSearchQuery(args.Query)
+	if parsed.query == "" {
+		res := failedSearchToolResult("invalid_arguments", "query is required", nil)
+		return parsed, &res
+	}
+	parsed.originalQuery = strings.TrimSpace(args.Query)
+	parsed.queryNormalized = parsed.originalQuery != "" && parsed.query != parsed.originalQuery
+	if parsed.queryNormalized {
+		parsed.payloadOriginalQuery = parsed.originalQuery
+	}
+
+	parsed.retrieveOpts = s.opts.RetrievalDefaults
+	parsed.topK, parsed.warnings = normalizeSearchTopK(args.TopK, parsed.retrieveOpts.TopK, s.opts.MaxTopK)
+	parsed.mode, err = normalizeSearchMode(args.Retrieval, parsed.retrieveOpts.Mode)
+	if err != nil {
+		res := failedSearchToolResult("invalid_retrieval", err.Error(), nil)
+		return parsed, &res
+	}
+	parsed.strategy, err = normalizeSearchStrategy(args.Strategy)
+	if err != nil {
+		res := failedSearchToolResult("invalid_strategy", err.Error(), nil)
+		return parsed, &res
+	}
+	if strings.TrimSpace(args.Strategy) == "" && isBroadCoverageQuestion(s.opts.UserQuestion) {
+		parsed.strategy = "broad"
+	}
+	parsed.maxExpansionQueries = s.opts.MaxExpansionQueries
+	if parsed.maxExpansionQueries < 0 {
+		parsed.maxExpansionQueries = 0
+	} else if parsed.maxExpansionQueries == 0 {
+		parsed.maxExpansionQueries = 2
+	}
+	return parsed, nil
+}
+
+func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.ToolInvocation) (falken.ToolExecutionResult, error) {
+	maxSearchCalls := s.opts.MaxSearchCalls
+	if maxSearchCalls <= 0 {
+		maxSearchCalls = 6
+	}
+
+	parsedArgs, failedRes := s.parseSearchArgs(invocation)
+	if failedRes != nil {
+		return *failedRes, nil
+	}
+
+	query := parsedArgs.query
+	payloadOriginalQuery := parsedArgs.payloadOriginalQuery
+	queryNormalized := parsedArgs.queryNormalized
+	retrieveOpts := parsedArgs.retrieveOpts
+	topK := parsedArgs.topK
+	warnings := parsedArgs.warnings
+	mode := parsedArgs.mode
+	strategy := parsedArgs.strategy
+	maxExpansionQueries := parsedArgs.maxExpansionQueries
+
+	s.mu.Lock()
+	if s.calls >= maxSearchCalls {
+		s.mu.Unlock()
+		return failedSearchToolResult("search_call_limit", "search_index call limit exceeded", nil), nil
+	}
+	s.calls++
+	s.mu.Unlock()
+
+	retrievalRes, failedRes2 := s.performRetrievalAndExpansion(ctx, query, retrieveOpts, topK, mode, strategy, maxExpansionQueries, warnings)
+	if failedRes2 != nil {
+		return *failedRes2, nil
+	}
+	result := retrievalRes.result
+	seedPlan := retrievalRes.seedPlan
+	internalPlans := retrievalRes.internalPlans
+	retrievalCalls := retrievalRes.retrievalCalls
+	expansionQueries := retrievalRes.expansionQueries
+	suggestedQueries := retrievalRes.suggestedQueries
+	warnings = retrievalRes.warnings
+	retrieveOpts = retrievalRes.retrieveOpts
+
+	payload, promotedContents := s.registerSources(query, payloadOriginalQuery, queryNormalized, strategy, retrieveOpts, seedPlan, internalPlans, expansionQueries, suggestedQueries, retrievalCalls, warnings, result)
+	return successfulSearchToolResult(renderSearchToolContent(query, strategy, seedPlan, expansionQueries, suggestedQueries, payload.Sources, warnings, payload.NewSources, payload.DuplicateSources, payload.DocumentMatches, promotedContents), payload), nil
 }
 
 func (s *searchIndexToolState) applyDocumentPromotions(query string, matches []DocumentMatchSummary) ([]DocumentPromotionDecision, []string) {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/shlex"
 	"github.com/smasonuk/falken-vector/internal/rag"
 )
 
@@ -41,16 +42,28 @@ func (o editorOpener) Open(path string, line int) error {
 	if strings.TrimSpace(o.editor) == "" {
 		return fmt.Errorf("editor is not configured")
 	}
-	name := o.editor
+	fields, err := shlex.Split(o.editor)
+	if err != nil {
+		return fmt.Errorf("failed to parse editor command: %w", err)
+	}
+	if len(fields) == 0 {
+		return fmt.Errorf("editor is not configured")
+	}
+	name := fields[0]
+	args := fields[1:]
 	switch filepath.Base(name) {
 	case "vim", "nvim", "vi":
-		return o.run(name, fmt.Sprintf("+%d", line), path)
+		args = append(args, fmt.Sprintf("+%d", line), path)
+		return o.run(name, args...)
 	case "code", "cursor":
-		return o.run(name, "-g", fmt.Sprintf("%s:%d", path, line))
+		args = append(args, "-g", fmt.Sprintf("%s:%d", path, line))
+		return o.run(name, args...)
 	case "zed":
-		return o.run(name, fmt.Sprintf("%s:%d", path, line))
+		args = append(args, fmt.Sprintf("%s:%d", path, line))
+		return o.run(name, args...)
 	default:
-		return o.run(name, path)
+		args = append(args, path)
+		return o.run(name, args...)
 	}
 }
 

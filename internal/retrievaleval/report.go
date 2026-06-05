@@ -53,6 +53,13 @@ func WriteText(w io.Writer, datasetPath string, summary Summary, details bool) e
 	return nil
 }
 
+func writeReportHeader(w io.Writer, name string) error {
+	if _, err := fmt.Fprintf(w, "\n# %s\n\n", name); err != nil {
+		return err
+	}
+	return nil
+}
+
 func WriteJSON(w io.Writer, summary Summary) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")

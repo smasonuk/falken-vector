@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -698,6 +699,9 @@ func stagedPendingRunForCLITest(t *testing.T, state string) (config.Paths, *mani
 
 func hasColumn(t *testing.T, db *sql.DB, table string, column string) bool {
 	t.Helper()
+	if !regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`).MatchString(table) {
+		t.Fatalf("invalid table name: %q", table)
+	}
 	rows, err := db.QueryContext(context.Background(), `pragma table_info(`+table+`)`)
 	if err != nil {
 		t.Fatal(err)

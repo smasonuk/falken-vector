@@ -1066,3 +1066,62 @@ func sameStringSlice(got []string, want []string) bool {
 	}
 	return true
 }
+
+func TestEnsureColumnValidation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manifest.sqlite")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		table      string
+		column     string
+		columnType string
+		wantErr    bool
+	}{
+		{
+			name:       "valid inputs",
+			table:      "documents",
+			column:     "new_col",
+			columnType: "text not null default ''",
+			wantErr:    false,
+		},
+		{
+			name:       "invalid table",
+			table:      "documents; drop table documents;--",
+			column:     "new_col",
+			columnType: "text",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid column",
+			table:      "documents",
+			column:     "new_col; drop table documents;--",
+			columnType: "text",
+			wantErr:    true,
+		},
+		{
+			name:       "invalid column type",
+			table:      "documents",
+			column:     "new_col",
+			columnType: "text; drop table documents;--",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ensureColumn(ctx, store.db, tt.table, tt.column, tt.columnType)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ensureColumn() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

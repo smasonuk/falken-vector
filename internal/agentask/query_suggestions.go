@@ -93,7 +93,11 @@ func suggestFollowupQueries(question string, sources []rag.SourceChunk, limit in
 }
 
 func flattenTermGroups(groups [][]string) []string {
-	out := make([]string, 0)
+	totalLen := 0
+	for _, group := range groups {
+		totalLen += len(group)
+	}
+	out := make([]string, 0, totalLen)
 	for _, group := range groups {
 		out = append(out, group...)
 	}

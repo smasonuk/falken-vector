@@ -11,6 +11,12 @@ import (
 	"github.com/smasonuk/falken-vector/internal/rag"
 )
 
+const (
+	DefaultMaxDocumentReadLines  = 500
+	DefaultMaxDocumentReadTokens = 25000
+	DefaultSmallFileTokenLimit   = 25000
+)
+
 type Options struct {
 	Question string
 

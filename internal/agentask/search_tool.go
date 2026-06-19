@@ -178,8 +178,26 @@ func (s *searchIndexToolState) execute(ctx context.Context, invocation falken.To
 	if strategy == "broad" && len(result.Chunks) != 0 && maxExpansionQueries > 0 {
 		seedSources := sourceChunksFromRetrieved(result.Chunks)
 		candidateExpansionQueries := SuggestBroadExpansionQueries(query, seedSources, maxExpansionQueries)
-		if len(candidateExpansionQueries) != 0 {
-			results := []rag.RetrieveResult{result}
+		numCandidates := len(candidateExpansionQueries)
+		if numCandidates != 0 {
+			expansionQueriesCap := len(expansionQueries) + numCandidates
+			if cap(expansionQueries) < expansionQueriesCap {
+				tmp := make([]string, len(expansionQueries), expansionQueriesCap)
+				copy(tmp, expansionQueries)
+				expansionQueries = tmp
+			}
+
+			internalPlansCap := len(internalPlans) + numCandidates
+			if cap(internalPlans) < internalPlansCap {
+				tmp := make([]searchQueryPlanPayload, len(internalPlans), internalPlansCap)
+				copy(tmp, internalPlans)
+				internalPlans = tmp
+			}
+
+			resultsCap := 1 + numCandidates
+			results := make([]rag.RetrieveResult, 1, resultsCap)
+			results[0] = result
+
 			for _, expansionQuery := range candidateExpansionQueries {
 				if !s.reserveRetrievalCall() {
 					warnings = append(warnings, fmt.Sprintf("broad expansion stopped after %d expansion queries because max retrieval calls was reached", len(expansionQueries)))

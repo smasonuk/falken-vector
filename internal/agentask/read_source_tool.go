@@ -37,6 +37,8 @@ const (
 	ReadSourceOverlapAllow   ReadSourceOverlapPolicy = "allow"
 )
 
+const DefaultMaxMergedReadSourceLines = 300
+
 func NewReadIndexSourceTool(opts ReadSourceToolOptions) falken.Tool {
 	if opts.ReadFile == nil {
 		opts.ReadFile = os.ReadFile
@@ -269,7 +271,7 @@ func normalizeReadSourceOverlapPolicy(policy ReadSourceOverlapPolicy) ReadSource
 
 func normalizeMaxMergedReadSourceLines(value int) int {
 	if value <= 0 {
-		return 300
+		return DefaultMaxMergedReadSourceLines
 	}
 	return value
 }

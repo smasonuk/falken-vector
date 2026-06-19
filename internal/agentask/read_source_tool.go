@@ -14,7 +14,12 @@ import (
 	"github.com/smasonuk/falken-vector/internal/rag"
 )
 
-const ReadIndexSourceToolName = "read_index_source"
+const (
+	ReadIndexSourceToolName = "read_index_source"
+
+	defaultContextLines = 20
+	maxContextLines     = 100
+)
 
 type ReadSourceToolOptions struct {
 	Registry                 *CitationRegistry
@@ -209,7 +214,7 @@ func readIndexSourceDescriptor() falken.ToolDescriptor {
 	return falken.ToolDescriptor{
 		Name:        ReadIndexSourceToolName,
 		Description: "Read additional nearby lines for a source previously returned by search_index. This tool can only read registered source numbers; it cannot read arbitrary paths.",
-		Parameters: json.RawMessage(`{
+		Parameters: json.RawMessage(fmt.Sprintf(`{
   "type": "object",
   "additionalProperties": false,
   "required": ["source_number"],
@@ -220,10 +225,10 @@ func readIndexSourceDescriptor() falken.ToolDescriptor {
     },
     "context_lines": {
       "type": "integer",
-      "description": "Number of lines before and after the source range to include. Defaults to 20 and caps at 100."
+      "description": "Number of lines before and after the source range to include. Defaults to %d and caps at %d."
     }
   }
-}`),
+}`, defaultContextLines, maxContextLines)),
 		Safety: falken.ToolSafety{
 			ReadsWorkspace: true,
 		},
@@ -245,13 +250,13 @@ func decodeReadIndexSourceArgs(raw json.RawMessage) (readIndexSourceArgs, error)
 
 func normalizeReadContextLines(value *int) (int, []string) {
 	if value == nil {
-		return 20, nil
+		return defaultContextLines, nil
 	}
 	if *value < 0 {
 		return 0, nil
 	}
-	if *value > 100 {
-		return 100, []string{"context_lines capped at 100"}
+	if *value > maxContextLines {
+		return maxContextLines, []string{fmt.Sprintf("context_lines capped at %d", maxContextLines)}
 	}
 	return *value, nil
 }

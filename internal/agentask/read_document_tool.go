@@ -128,7 +128,7 @@ func normalizeReadDocumentRequest(args readIndexDocumentArgs, opts ReadDocumentT
 	}
 	maxLines := opts.MaxLines
 	if maxLines <= 0 {
-		maxLines = 500
+		maxLines = DefaultMaxDocumentReadLines
 	}
 	if args.MaxLines != nil {
 		maxLines = *args.MaxLines
@@ -138,7 +138,7 @@ func normalizeReadDocumentRequest(args readIndexDocumentArgs, opts ReadDocumentT
 	}
 	maxTokens := opts.MaxTokens
 	if maxTokens <= 0 {
-		maxTokens = 25000
+		maxTokens = DefaultMaxDocumentReadTokens
 	}
 	if args.MaxTokens != nil {
 		maxTokens = *args.MaxTokens

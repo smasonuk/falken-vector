@@ -10,7 +10,11 @@ import (
 	"github.com/smasonuk/falken-vector/internal/rag"
 )
 
-const ReadIndexDocumentToolName = "read_index_document"
+const (
+	ReadIndexDocumentToolName    = "read_index_document"
+	DefaultMaxDocumentReadLines  = 500
+	DefaultMaxDocumentReadTokens = 25000
+)
 
 type Range struct {
 	StartLine int `json:"start_line"`
@@ -77,8 +81,8 @@ type DocumentPromotionDecision struct {
 func defaultDocumentPromotionOptions() DocumentPromotionOptions {
 	return DocumentPromotionOptions{
 		Enabled:                true,
-		MaxDocumentReadLines:   500,
-		MaxDocumentReadTokens:  25000,
+		MaxDocumentReadLines:   DefaultMaxDocumentReadLines,
+		MaxDocumentReadTokens:  DefaultMaxDocumentReadTokens,
 		MaxDocumentReads:       2,
 		SmallFileLineLimit:     400,
 		SmallFileTokenLimit:    25000,
@@ -92,10 +96,10 @@ func defaultDocumentPromotionOptions() DocumentPromotionOptions {
 
 func normalizeDocumentPromotionOptions(opts DocumentPromotionOptions) DocumentPromotionOptions {
 	if opts.MaxDocumentReadLines <= 0 {
-		opts.MaxDocumentReadLines = 500
+		opts.MaxDocumentReadLines = DefaultMaxDocumentReadLines
 	}
 	if opts.MaxDocumentReadTokens <= 0 {
-		opts.MaxDocumentReadTokens = 25000
+		opts.MaxDocumentReadTokens = DefaultMaxDocumentReadTokens
 	}
 	if opts.MaxDocumentReads <= 0 {
 		opts.MaxDocumentReads = 2

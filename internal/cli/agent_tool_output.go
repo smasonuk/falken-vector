@@ -148,47 +148,47 @@ func formatAgentToolResult(result falken.ToolResult) []string {
 	return out
 }
 
-func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
-	var payload struct {
-		Success         bool   `json:"success"`
-		Status          string `json:"status"`
-		Query           string `json:"query"`
-		OriginalQuery   string `json:"original_query"`
-		QueryNormalized bool   `json:"query_normalized"`
-		TopK            int    `json:"top_k"`
-		QueryPlan       struct {
-			Mode    string   `json:"mode"`
-			Queries []string `json:"queries"`
-		} `json:"query_plan"`
-		SeedQueryPlan struct {
-			Mode    string   `json:"mode"`
-			Queries []string `json:"queries"`
-		} `json:"seed_query_plan"`
-		Sources            []json.RawMessage `json:"sources"`
-		ExpansionQueries   []string          `json:"expansion_queries"`
-		SuggestedQueries   []string          `json:"suggested_queries"`
-		NewSources         int               `json:"new_sources"`
-		DuplicateSources   int               `json:"duplicate_sources"`
-		UniqueDocuments    int               `json:"unique_documents"`
-		RetrievalCalls     int               `json:"retrieval_calls"`
-		DocumentPromotions []struct {
-			SourceNumber    int    `json:"source_number"`
-			Path            string `json:"path"`
-			Status          string `json:"status"`
-			Reason          string `json:"reason"`
-			StartLine       int    `json:"start_line"`
-			EndLine         int    `json:"end_line"`
-			Lines           int    `json:"lines"`
-			EstimatedTokens int    `json:"estimated_tokens"`
-			MaxLines        int    `json:"max_lines"`
-			MaxTokens       int    `json:"max_tokens"`
-		} `json:"document_promotions"`
-		Warnings []string `json:"warnings"`
-		Error    string   `json:"error"`
-	}
-	if len(result.Payload) == 0 || json.Unmarshal(result.Payload, &payload) != nil {
-		return nil, false
-	}
+type agentSearchDocumentPromotion struct {
+	SourceNumber    int    `json:"source_number"`
+	Path            string `json:"path"`
+	Status          string `json:"status"`
+	Reason          string `json:"reason"`
+	StartLine       int    `json:"start_line"`
+	EndLine         int    `json:"end_line"`
+	Lines           int    `json:"lines"`
+	EstimatedTokens int    `json:"estimated_tokens"`
+	MaxLines        int    `json:"max_lines"`
+	MaxTokens       int    `json:"max_tokens"`
+}
+
+type agentSearchPayload struct {
+	Success         bool   `json:"success"`
+	Status          string `json:"status"`
+	Query           string `json:"query"`
+	OriginalQuery   string `json:"original_query"`
+	QueryNormalized bool   `json:"query_normalized"`
+	TopK            int    `json:"top_k"`
+	QueryPlan       struct {
+		Mode    string   `json:"mode"`
+		Queries []string `json:"queries"`
+	} `json:"query_plan"`
+	SeedQueryPlan struct {
+		Mode    string   `json:"mode"`
+		Queries []string `json:"queries"`
+	} `json:"seed_query_plan"`
+	Sources            []json.RawMessage              `json:"sources"`
+	ExpansionQueries   []string                       `json:"expansion_queries"`
+	SuggestedQueries   []string                       `json:"suggested_queries"`
+	NewSources         int                            `json:"new_sources"`
+	DuplicateSources   int                            `json:"duplicate_sources"`
+	UniqueDocuments    int                            `json:"unique_documents"`
+	RetrievalCalls     int                            `json:"retrieval_calls"`
+	DocumentPromotions []agentSearchDocumentPromotion `json:"document_promotions"`
+	Warnings           []string                       `json:"warnings"`
+	Error              string                         `json:"error"`
+}
+
+func formatAgentSearchSummary(result falken.ToolResult, payload *agentSearchPayload) string {
 	status := payload.Status
 	if status == "" {
 		status, _ = agentToolResultStatus(result)
@@ -200,7 +200,10 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 	if payload.RetrievalCalls > 0 {
 		summary += fmt.Sprintf(", new=%d, duplicates=%d, docs=%d, retrievals=%d", payload.NewSources, payload.DuplicateSources, payload.UniqueDocuments, payload.RetrievalCalls)
 	}
-	out := []string{summary}
+	return summary
+}
+
+func formatAgentSearchQueries(payload *agentSearchPayload, out []string) []string {
 	seedQueries := payload.SeedQueryPlan.Queries
 	label := "agent search query plan:"
 	if len(payload.ExpansionQueries) != 0 {
@@ -227,7 +230,11 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 			out = append(out, fmt.Sprintf("  %d. %s", i+1, query))
 		}
 	}
-	for _, promotion := range payload.DocumentPromotions {
+	return out
+}
+
+func formatAgentSearchPromotions(promotions []agentSearchDocumentPromotion, out []string) []string {
+	for _, promotion := range promotions {
 		source := rag.SourceChunk{
 			SourceNumber: promotion.SourceNumber,
 			Path:         promotion.Path,
@@ -255,12 +262,28 @@ func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
 			}
 		}
 	}
+	return out
+}
+
+func formatAgentSearchWarningsAndErrors(result falken.ToolResult, payload *agentSearchPayload, out []string) []string {
 	for _, warning := range payload.Warnings {
 		out = append(out, fmt.Sprintf("agent tool warning: %s: %s", result.Name, warning))
 	}
 	if payload.Error != "" {
 		out = append(out, fmt.Sprintf("agent tool error: %s: %s", result.Name, payload.Error))
 	}
+	return out
+}
+
+func formatAgentSearchToolResult(result falken.ToolResult) ([]string, bool) {
+	var payload agentSearchPayload
+	if len(result.Payload) == 0 || json.Unmarshal(result.Payload, &payload) != nil {
+		return nil, false
+	}
+	out := []string{formatAgentSearchSummary(result, &payload)}
+	out = formatAgentSearchQueries(&payload, out)
+	out = formatAgentSearchPromotions(payload.DocumentPromotions, out)
+	out = formatAgentSearchWarningsAndErrors(result, &payload, out)
 	return out, true
 }
 

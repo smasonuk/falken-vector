@@ -1110,109 +1110,97 @@ func TestAskAgentSourceAuditOmitsQueryCountsWithoutDebug(t *testing.T) {
 	}
 }
 
-func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
-	state, _ := setupEvalCLITest(t)
-	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
-		if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapMerge {
-			t.Fatalf("ReadSourceOverlapPolicy = %q, want broad default merge", opts.ReadSourceOverlapPolicy)
-		}
-		if opts.MaxMergedReadSourceLines != 300 {
-			t.Fatalf("MaxMergedReadSourceLines = %d, want CLI default 300", opts.MaxMergedReadSourceLines)
-		}
-		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
-			ID:        "call-search",
-			Name:      "search_index",
-			Arguments: json.RawMessage(`{"query":"AlphaFold","strategy":"broad","top_k":8}`),
-		}})
-		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
-			CallID: "call-search",
-			Name:   "search_index",
-			Payload: json.RawMessage(`{
-				"success": true,
-				"status": "ok",
-				"query": "AlphaFold",
-				"top_k": 12,
-				"seed_query_plan": {"queries": ["AlphaFold"]},
-				"expansion_queries": ["AlphaFold A3M PDB JSON NCBI", "AlphaFold species NCBI", "protein folding PDB error JSON"],
-				"sources": [{"number":10},{"number":11},{"number":12}],
-				"new_sources": 3,
-				"duplicate_sources": 0,
-				"unique_documents": 1,
-				"retrieval_calls": 3
-			}`),
-		}})
-		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
-			ID:        "call-search-2",
-			Name:      "search_index",
-			Arguments: json.RawMessage(`{"query":"protein folding folding","strategy":"broad","top_k":5}`),
-		}})
-		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
-			CallID: "call-search-2",
-			Name:   "search_index",
-			Payload: json.RawMessage(`{
-				"success": true,
-				"status": "ok",
-				"query": "protein folding",
-				"original_query": "protein folding folding",
-				"query_normalized": true,
-				"top_k": 12,
-				"seed_query_plan": {"queries": ["protein folding"]},
-				"expansion_queries": ["protein folding PDB error JSON"],
-				"sources": [{"number":12}],
-				"new_sources": 1,
-				"duplicate_sources": 0,
-				"unique_documents": 1,
-				"retrieval_calls": 2
-			}`),
-		}})
-		opts.Events(falken.Event{Type: falken.EventThought, Text: "agent thin-source nudge: expanding [source 11]"})
-		opts.Events(falken.Event{ToolCall: &falken.ToolCall{
-			ID:        "call-read",
-			Name:      "read_index_source",
-			Arguments: json.RawMessage(`{"source_number":11,"context_lines":20}`),
-		}})
-		opts.Events(falken.Event{ToolResult: &falken.ToolResult{
-			CallID: "call-read",
-			Name:   "read_index_source",
-			Payload: json.RawMessage(`{
-				"success": true,
-				"status": "ok",
-				"source_number": 11,
-				"path": "alphafold/meetings/sdb.md",
-				"start_line": 1,
-				"end_line": 33
-			}`),
-		}})
-		return agentask.Result{
-			Answer: "AlphaFold outputs include A3M, PDB, JSON, NCBI, UniProt metadata, and folding workflow notes [source 11].",
-			Sources: []rag.SourceChunk{
-				{SourceNumber: 10, Path: "alphafold/meetings/sdb.md", StartLine: 21, EndLine: 26, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold", Strategy: "broad", Rank: 1}},
-				{SourceNumber: 11, Path: "alphafold/meetings/sdb.md", StartLine: 1, EndLine: 33, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold", Strategy: "broad", Rank: 2}},
-				{SourceNumber: 12, Path: "science_cloud/info/apis.md", StartLine: 103, EndLine: 103, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "protein folding", Strategy: "broad", Rank: 3}},
-			},
-			ThinSourceNudged: true,
-			ThinSourceWarnings: []string{
-				"thin-source nudge: expanding [source 11]",
-			},
-			SearchToolCalls:         2,
-			RetrievalCalls:          5,
-			ReadSourceCalls:         1,
-			ReadSourceOverlapPolicy: "merge",
-		}
-	})
-	defer restore()
-
-	cmd := NewRootCommand()
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"--state-dir", state, "ask", "summarize information on alphafold or anything related to folding", "--agent", "--retrieval", "lexical", "--show-agent-tools"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute: %v", err)
+func alphaFoldFlowMock(t *testing.T, opts agentask.Options) agentask.Result {
+	if opts.ReadSourceOverlapPolicy != agentask.ReadSourceOverlapMerge {
+		t.Fatalf("ReadSourceOverlapPolicy = %q, want broad default merge", opts.ReadSourceOverlapPolicy)
 	}
-	stderr := errOut.String()
-	output := out.String()
+	if opts.MaxMergedReadSourceLines != 300 {
+		t.Fatalf("MaxMergedReadSourceLines = %d, want CLI default 300", opts.MaxMergedReadSourceLines)
+	}
+	opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+		ID:        "call-search",
+		Name:      "search_index",
+		Arguments: json.RawMessage(`{"query":"AlphaFold","strategy":"broad","top_k":8}`),
+	}})
+	opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+		CallID: "call-search",
+		Name:   "search_index",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "ok",
+			"query": "AlphaFold",
+			"top_k": 12,
+			"seed_query_plan": {"queries": ["AlphaFold"]},
+			"expansion_queries": ["AlphaFold A3M PDB JSON NCBI", "AlphaFold species NCBI", "protein folding PDB error JSON"],
+			"sources": [{"number":10},{"number":11},{"number":12}],
+			"new_sources": 3,
+			"duplicate_sources": 0,
+			"unique_documents": 1,
+			"retrieval_calls": 3
+		}`),
+	}})
+	opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+		ID:        "call-search-2",
+		Name:      "search_index",
+		Arguments: json.RawMessage(`{"query":"protein folding folding","strategy":"broad","top_k":5}`),
+	}})
+	opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+		CallID: "call-search-2",
+		Name:   "search_index",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "ok",
+			"query": "protein folding",
+			"original_query": "protein folding folding",
+			"query_normalized": true,
+			"top_k": 12,
+			"seed_query_plan": {"queries": ["protein folding"]},
+			"expansion_queries": ["protein folding PDB error JSON"],
+			"sources": [{"number":12}],
+			"new_sources": 1,
+			"duplicate_sources": 0,
+			"unique_documents": 1,
+			"retrieval_calls": 2
+		}`),
+	}})
+	opts.Events(falken.Event{Type: falken.EventThought, Text: "agent thin-source nudge: expanding [source 11]"})
+	opts.Events(falken.Event{ToolCall: &falken.ToolCall{
+		ID:        "call-read",
+		Name:      "read_index_source",
+		Arguments: json.RawMessage(`{"source_number":11,"context_lines":20}`),
+	}})
+	opts.Events(falken.Event{ToolResult: &falken.ToolResult{
+		CallID: "call-read",
+		Name:   "read_index_source",
+		Payload: json.RawMessage(`{
+			"success": true,
+			"status": "ok",
+			"source_number": 11,
+			"path": "alphafold/meetings/sdb.md",
+			"start_line": 1,
+			"end_line": 33
+		}`),
+	}})
+	return agentask.Result{
+		Answer: "AlphaFold outputs include A3M, PDB, JSON, NCBI, UniProt metadata, and folding workflow notes [source 11].",
+		Sources: []rag.SourceChunk{
+			{SourceNumber: 10, Path: "alphafold/meetings/sdb.md", StartLine: 21, EndLine: 26, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold", Strategy: "broad", Rank: 1}},
+			{SourceNumber: 11, Path: "alphafold/meetings/sdb.md", StartLine: 1, EndLine: 33, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "AlphaFold", Strategy: "broad", Rank: 2}},
+			{SourceNumber: 12, Path: "science_cloud/info/apis.md", StartLine: 103, EndLine: 103, Provenance: &rag.SourceProvenance{ToolName: agentask.SearchIndexToolName, Query: "protein folding", Strategy: "broad", Rank: 3}},
+		},
+		ThinSourceNudged: true,
+		ThinSourceWarnings: []string{
+			"thin-source nudge: expanding [source 11]",
+		},
+		SearchToolCalls:         2,
+		RetrievalCalls:          5,
+		ReadSourceCalls:         1,
+		ReadSourceOverlapPolicy: "merge",
+	}
+}
+
+func verifyAlphaFoldFlowOutput(t *testing.T, stderr, output string) {
+	t.Helper()
 	for _, want := range []string{
 		"agent broad expansion queries:",
 		"  1. AlphaFold A3M PDB JSON NCBI",
@@ -1252,6 +1240,26 @@ func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
 	if strings.Contains(output, "Other sources available to the agent:\n[source 11]") {
 		t.Fatalf("output = %q, cited source repeated in other section", output)
 	}
+}
+
+func TestAskAgentAlphaFoldFlowRegression(t *testing.T) {
+	state, _ := setupEvalCLITest(t)
+	restore := stubAgentAskCLI(t, func(opts agentask.Options) agentask.Result {
+		return alphaFoldFlowMock(t, opts)
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--state-dir", state, "ask", "summarize information on alphafold or anything related to folding", "--agent", "--retrieval", "lexical", "--show-agent-tools"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	verifyAlphaFoldFlowOutput(t, errOut.String(), out.String())
 }
 
 func TestAskAgentNormalizesGroupedCitationsForSourcesAndAudit(t *testing.T) {
